@@ -26,7 +26,7 @@
 
 
 -----
-Causal Forcing significantly outperforms Self Forcing in **both visual quality and motion dynamics**, while plugging into Self Forcing inference setup with **the same training budget and inference efficiency**—enabling real-time, streaming video generation on a single RTX 4090.
+Causal Forcing significantly outperforms Self Forcing in **both visual quality and motion dynamics**, while keeping **the same training budget and inference efficiency**—enabling real-time, streaming video generation on a single RTX 4090.
 
 -----
 
