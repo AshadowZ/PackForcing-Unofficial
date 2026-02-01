@@ -227,7 +227,7 @@ And then train DMD models:
     --config_path configs/causal_forcing_dmd_chunkwise.yaml \
     --logdir logs/causal_forcing_dmd_chunkwise
   ```
-  > We recommend training 100 steps. More than 1K steps will reduce dynamic degree.
+  > We recommend training 100~200 steps. More than 1K steps will reduce dynamic degree.
 
 Such models are the final models used to generate videos.
 
