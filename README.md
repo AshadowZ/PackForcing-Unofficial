@@ -30,9 +30,11 @@ Causal Forcing significantly outperforms Self Forcing in both visual quality and
 
 -----
 
-<video controls style="width:100%">
-  <source src="assets/demo.mp4" type="video/mp4" />
-</video>
+
+
+https://github.com/user-attachments/assets/310f0cfa-e1bb-496d-8941-87f77b3271c0
+
+
 
 ## Quick Start
 
