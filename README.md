@@ -237,5 +237,10 @@ This codebase is built on top of the open-source implementation of [CausVid](htt
 ## References
 If you find the method useful, please cite
 ```
-TBD
+@article{zhu2026casualforcing,
+  title={Riflex: A free lunch for length extrapolation in video diffusion transformers},
+  author={Zhu hongzhou, He Guande, Chongxuan and Zhu, Jun},
+  journal={arXiv preprint arXiv:2502.15894},
+  year={2026}
+}
 ```
