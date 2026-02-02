@@ -239,7 +239,7 @@ If you find the method useful, please cite
 ```
 @article{zhu2026casualforcing,
   title={Riflex: A free lunch for length extrapolation in video diffusion transformers},
-  author={Zhu hongzhou, He Guande, Chongxuan and Zhu, Jun},
+  author={Zhu hongzhou, Zhao Min, He Guande, Chongxuan and Zhu, Jun},
   journal={arXiv preprint arXiv:2502.15894},
   year={2026}
 }
