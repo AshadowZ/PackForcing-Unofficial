@@ -232,6 +232,10 @@ And then train DMD models:
   > We recommend training 100~200 steps. More than 1K steps will reduce dynamic degree.
 
 Such models are the final models used to generate videos.
+## QA & Blog 
+> currently in Chinese
+
+See [here](https://zhuanlan.zhihu.com/p/2002114039493461457).
 
 ## Acknowledgements
 This codebase is built on top of the open-source implementation of [CausVid](https://github.com/tianweiy/CausVid), [Self Forcing](https://github.com/guandeh17/Self-Forcing) and the [Wan2.1](https://github.com/Wan-Video/Wan2.1) repo.
