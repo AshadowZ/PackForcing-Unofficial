@@ -20,7 +20,7 @@
 
 </div>
   </p>
-  <h3 align="center"><a href="https://arxiv.org/abs/2602.02214">Paper</a> | <a href="https://thu-ml.github.io/CausalForcing.github.io">Website</a> | <a href="https://huggingface.co/zhuhz22/Causal-Forcing/tree/main">Models</a> | <a href="assets/wechat.jpg">WeChat</a></h3>
+  <h3 align="center"><a href="https://arxiv.org/abs/2602.02214">Paper</a> | <a href="https://thu-ml.github.io/CausalForcing.github.io">Website</a> | <a href="https://huggingface.co/zhuhz22/Causal-Forcing/tree/main">Models</a> | <a href="assets/wechat.jpg">WeChat</a> | <a href=https://zhuanlan.zhihu.com/p/2002114039493461457">Blog (in Chinese)</a></h3>
 </p>
 
 
