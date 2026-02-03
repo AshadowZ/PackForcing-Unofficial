@@ -84,6 +84,7 @@ python inference.py \
 
 
 ## Training
+<img width="4944" height="2154" alt="overview" src="https://github.com/user-attachments/assets/df96fae3-cecc-4915-9a14-d1a5f326074e" />
 
 <details>
 <summary> Stage 1: Autoregressive Diffusion Training (Can skip by using our pretrained checkpoints. Click to expand.)</summary>
