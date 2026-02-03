@@ -194,6 +194,7 @@ And then train ODE initialization models:
 
 > This stage is compatible with Self Forcing training, so you can migrate seamlessly by using our configs and checkpoints.
 
+> Set your wandb configs before training.
 
 First download the dataset:
 ```bash
