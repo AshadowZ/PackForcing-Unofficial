@@ -20,7 +20,7 @@
 
 </div>
   </p>
-  <h3 align="center"><a href="https://arxiv.org/abs/2602.xxxxx">Paper</a> | <a href="https://thu-ml.github.io/CausalForcing.github.io">Website</a> | <a href="https://huggingface.co/zhuhz22/Causal-Forcing/tree/main">Models</a> | <a href="assets/wechat.jpg">WeChat</a></h3>
+  <h3 align="center"><a href="https://arxiv.org/abs/2602.02214">Paper</a> | <a href="https://thu-ml.github.io/CausalForcing.github.io">Website</a> | <a href="https://huggingface.co/zhuhz22/Causal-Forcing/tree/main">Models</a> | <a href="assets/wechat.jpg">WeChat</a></h3>
 </p>
 
 
@@ -237,10 +237,13 @@ This codebase is built on top of the open-source implementation of [CausVid](htt
 ## References
 If you find the method useful, please cite
 ```
-@article{zhu2026casualforcing,
-  title={Riflex: A free lunch for length extrapolation in video diffusion transformers},
-  author={Zhu hongzhou, Zhao Min, He Guande, Chongxuan and Zhu, Jun},
-  journal={arXiv preprint arXiv:2502.15894},
-  year={2026}
+@misc{zhu2026causalforcingautoregressivediffusion,
+      title={Causal Forcing: Autoregressive Diffusion Distillation Done Right for High-Quality Real-Time Interactive Video Generation}, 
+      author={Hongzhou Zhu and Min Zhao and Guande He and Hang Su and Chongxuan Li and Jun Zhu},
+      year={2026},
+      eprint={2602.02214},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2602.02214}, 
 }
 ```
