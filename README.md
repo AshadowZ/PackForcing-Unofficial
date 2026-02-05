@@ -196,8 +196,8 @@ And then train ODE initialization models:
 
 
 <details>
-<summary> Stage 2 (Substitute, without creating ODE paired data): Causal CD (Click to expand.)</summary>     
-
+<summary> 🔥 NEW: Substitute for Stage 2, without creating ODE paired data: Causal CD (Click to expand.)</summary>     
+<br>
 Since creating ODE-paired data is very time-consuming, we also provide an alternative here that achieves the same effect as ODE distillation while requiring only ground-truth data.
 
 **Note:** The current CD is still in an early stage, with many suboptimal implementations in both the algorithm and (especially) infra efficiency. We’ll continue iterating and improving it.
