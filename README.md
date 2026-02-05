@@ -193,6 +193,39 @@ And then train ODE initialization models:
 
 </details>
 
+
+
+<details>
+<summary> Stage 2 (Substitute, without creating ODE paired data): Causal CD (Click to expand.)</summary>     
+
+Since creating ODE-paired data is very time-consuming, we also provide an alternative here that achieves the same effect as ODE distillation while requiring only ground-truth data.
+
+**Note:** The current CD is still in an early stage, with many suboptimal implementations in both the algorithm and (especially) infra efficiency. We’ll continue iterating and improving it.
+
+- Frame-wise:
+  ```bash
+  torchrun --nnodes=8 --nproc_per_node=8 --rdzv_id=5235 \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint $MASTER_ADDR \
+    train.py \
+    --config_path configs/causal_cd_framewise.yaml \
+    --logdir logs/causal_cd_framewise
+  ```
+- Chunk-wise:
+  ```bash
+  torchrun --nnodes=8 --nproc_per_node=8 --rdzv_id=5235 \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint $MASTER_ADDR \
+    train.py \
+    --config_path configs/causal_cd_chunkwise.yaml \
+    --logdir logs/causal_cd_chunkwise
+  ```
+
+> We recommend training no less than 1K steps, and more steps (e.g., 3~5K) will lead to better performance.
+</details>
+
+
+
 ### Stage 3: DMD
 
 > This stage is compatible with Self Forcing training, so you can migrate seamlessly by using our configs and checkpoints.
