@@ -38,6 +38,11 @@ Causal Forcing significantly outperforms Self Forcing in **both visual quality a
 https://github.com/user-attachments/assets/310f0cfa-e1bb-496d-8941-87f77b3271c0
 
 
+## 🔥🔥 News
+
+- **2026.2.5** : Release causal consistency distillation (Preview) as substitute for ODE distillation, **free of generating ODE paired data**!
+- **2026.2.2** : The [paper](https://arxiv.org/abs/2602.02214), [project page](https://thu-ml.github.io/CausalForcing.github.io/), and code are released.
+
 
 ## Quick Start
 
