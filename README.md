@@ -38,8 +38,8 @@ Causal Forcing significantly outperforms Self Forcing in **both visual quality a
 https://github.com/user-attachments/assets/310f0cfa-e1bb-496d-8941-87f77b3271c0
 
 
-## 🔥🔥 News
-
+## 🔥 News
+- **2026.2.7** : Causal Forcing now supports Rolling Forcing, enabling minute-level long video generation!
 - **2026.2.5** : Release causal consistency distillation (Preview) as substitute for ODE distillation, **free of generating ODE paired data**!
 - **2026.2.2** : The [paper](https://arxiv.org/abs/2602.02214), [project page](https://thu-ml.github.io/CausalForcing.github.io/), and code are released.
 
@@ -89,6 +89,9 @@ python inference.py \
   --data_path prompts/demos.txt
 ```
 
+
+### 🔥 NEW: Minute-level Long Video Generation
+Built on [Rolling Forcing](https://github.com/TencentARC/RollingForcing), we implemented minute-level long video generation. See [here](./long_video) for the detail.
 
 
 ## Training
@@ -279,7 +282,7 @@ Such models are the final models used to generate videos.
 See [here](https://zhuanlan.zhihu.com/p/2002114039493461457).
 
 ## Acknowledgements
-This codebase is built on top of the open-source implementation of [CausVid](https://github.com/tianweiy/CausVid), [Self Forcing](https://github.com/guandeh17/Self-Forcing) and the [Wan2.1](https://github.com/Wan-Video/Wan2.1) repo.
+This codebase is built on top of the open-source implementation of [CausVid](https://github.com/tianweiy/CausVid), [Self Forcing](https://github.com/guandeh17/Self-Forcing), [Rolling Forcing](https://github.com/TencentARC/RollingForcing) and the [Wan2.1](https://github.com/Wan-Video/Wan2.1) repo.
 
 ## References
 If you find the method useful, please cite
