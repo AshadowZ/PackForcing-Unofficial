@@ -284,13 +284,10 @@ This codebase is built on top of the open-source implementation of [CausVid](htt
 ## References
 If you find the method useful, please cite
 ```
-@misc{zhu2026causalforcingautoregressivediffusion,
-      title={Causal Forcing: Autoregressive Diffusion Distillation Done Right for High-Quality Real-Time Interactive Video Generation}, 
-      author={Hongzhou Zhu and Min Zhao and Guande He and Hang Su and Chongxuan Li and Jun Zhu},
-      year={2026},
-      eprint={2602.02214},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2602.02214}, 
+@article{zhu2026causal,
+  title={Causal Forcing: Autoregressive Diffusion Distillation Done Right for High-Quality Real-Time Interactive Video Generation},
+  author={Zhu, Hongzhou and Zhao, Min and He, Guande and Su, Hang and Li, Chongxuan and Zhu, Jun},
+  journal={arXiv preprint arXiv:2602.02214},
+  year={2026}
 }
 ```
