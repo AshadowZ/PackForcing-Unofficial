@@ -34,8 +34,7 @@ torchrun --nproc_per_node=8 \
   --config_path configs/rolling_forcing_dmd.yaml \
   --logdir logs/rolling_forcing_dmd
 ```
-> We recommend training for 1000 steps. 1000 steps is already enough to converge, while training for more steps leads to abnormal camera panning.
-
+> We recommend training for 3000 steps.
 
 ### Acknowledge
 We adopt [Rolling Forcing](https://github.com/TencentARC/RollingForcing) as our long video generation framework and only change the ODE initialization part.
