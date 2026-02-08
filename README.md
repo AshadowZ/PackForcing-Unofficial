@@ -40,7 +40,7 @@ https://github.com/user-attachments/assets/310f0cfa-e1bb-496d-8941-87f77b3271c0
 
 ## 🔥 News
 - **2026.2.8** : [Deep Forcing](https://cvlab-kaist.github.io/DeepForcing/) adopts our Causal Forcing as one of the base models!
-- **2026.2.7** : Causal Forcing now supports Rolling Forcing, enabling minute-level long video generation!
+- **2026.2.7** : Causal Forcing now supports [Rolling Forcing](https://github.com/TencentARC/RollingForcing), enabling minute-level long video generation!
 - **2026.2.5** : Release causal consistency distillation (Preview) as substitute for ODE distillation, **free of generating ODE paired data**!
 - **2026.2.2** : The [paper](https://arxiv.org/abs/2602.02214), [project page](https://thu-ml.github.io/CausalForcing.github.io/), and code are released.
 
