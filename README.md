@@ -58,7 +58,7 @@ pip install git+https://github.com/openai/CLIP.git
 pip install flash-attn --no-build-isolation
 python setup.py develop
 ```
-### Download checkpoints
+### Download Checkpoints
 ```bash
 hf download Wan-AI/Wan2.1-T2V-1.3B  --local-dir wan_models/Wan2.1-T2V-1.3B
 hf download Wan-AI/Wan2.1-T2V-14B  --local-dir wan_models/Wan2.1-T2V-14B
@@ -90,7 +90,7 @@ python inference.py \
 ```
 
 
-### 🔥 NEW: Minute-level Long Video Generation
+### Minute-level Long Video Generation
 Built on [Rolling Forcing](https://github.com/TencentARC/RollingForcing), we implemented minute-level long video generation. See [here](./long_video) for the detail.
 
 
