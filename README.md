@@ -71,7 +71,7 @@ hf download zhuhz22/Causal-Forcing framewise/causal_forcing.pt --local-dir check
 ### CLI Inference
 > We open-source both the frame-wise and chunk-wise models; the former is a setting that Self Forcing has chosen not to release.
 
-Frame-wise model (**higher dynamic degree and more expressive**):
+Frame-wise model (**higher dynamic degree and more expressive, recommended**):
 ```bash
 python inference.py \
   --config_path configs/causal_forcing_dmd_framewise.yaml \
