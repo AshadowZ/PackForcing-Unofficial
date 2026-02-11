@@ -16,7 +16,7 @@ from pipeline import (
     CausalDiffusionInferencePipeline,
     CausalInferencePipeline,
 )
-from utils.dataset import TextDataset
+from utils.dataset import TextDataset, TextImagePairDataset
 from utils.misc import set_seed
 
 from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller
@@ -29,6 +29,7 @@ parser.add_argument("--output_folder", type=str, help="Output folder")
 parser.add_argument("--num_output_frames", type=int, default=21, help="Number of overlap frames between sliding windows")
 parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA parameters")
 parser.add_argument("--seed", type=int, default=0, help="Random seed")
+parser.add_argument("--i2v", action="store_true", help="Whether to perform I2V (or T2V by default)")
 args = parser.parse_args()
 
 # Initialize distributed inference
@@ -88,7 +89,16 @@ pipeline.vae.to(device=gpu)
 
 
 # Create dataset
-dataset = TextDataset(prompt_path=args.data_path)
+if args.i2v:
+    assert not dist.is_initialized(), "I2V does not support distributed inference yet"
+    transform = transforms.Compose([
+        transforms.Resize((480, 832)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5], [0.5])
+    ])
+    dataset = TextImagePairDataset(args.data_path, transform=transform)
+else:
+    dataset = TextDataset(prompt_path=args.data_path, extended_prompt_path=args.extended_prompt_path)
 num_prompts = len(dataset)
 print(f"Number of prompts: {num_prompts}")
 
@@ -129,22 +139,41 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
     all_video = []
     num_generated_frames = 0  # Number of generated (latent) frames
     
-    # For text-to-video, batch is just the text prompt
-    prompt = batch['prompts'][0]
-    output_path = os.path.join(args.output_folder, f'{prompt[:100]}.mp4')
-    if os.path.exists(output_path):
-        print('Video has been generated. Pass!')
-        continue
-    extended_prompt = batch['extended_prompts'][0] if 'extended_prompts' in batch else None
-    if extended_prompt is not None:
-        prompts = [extended_prompt] 
-    else:
-        prompts = [prompt] 
+    
+    if args.i2v:
+        assert config.num_frame_per_block == 1, "Current I2V only supports the frame-wise model."
+        # For image-to-video, batch contains image and caption
+        prompt = batch['prompts'][0]  # Get caption from batch
+        output_path = os.path.join(args.output_folder, f'{prompt[:100]}.mp4')
+        if os.path.exists(output_path):
+            print('Video has been generated. Pass!')
+            continue
+        # Process the image
+        image = batch['image'].squeeze(0).unsqueeze(0).unsqueeze(2).to(device=device, dtype=torch.bfloat16)
 
-    initial_latent = None
-    sampled_noise = torch.randn(
-        [1, args.num_output_frames, 16, 60, 104], device=device, dtype=torch.bfloat16
-    )
+        # Encode the input image as the first latent
+        initial_latent = pipeline.vae.encode_to_latent(image).to(device=device, dtype=torch.bfloat16)
+        prompts = [prompt] 
+        sampled_noise = torch.randn(
+            [1, args.num_output_frames - 1, 16, 60, 104], device=device, dtype=torch.bfloat16
+        )
+    else:
+        # For text-to-video, batch is just the text prompt
+        prompt = batch['prompts'][0]
+        output_path = os.path.join(args.output_folder, f'{prompt[:100]}.mp4')
+        if os.path.exists(output_path):
+            print('Video has been generated. Pass!')
+            continue
+        extended_prompt = batch['extended_prompts'][0] if 'extended_prompts' in batch else None
+        if extended_prompt is not None:
+            prompts = [extended_prompt] 
+        else:
+            prompts = [prompt] 
+
+        initial_latent = None
+        sampled_noise = torch.randn(
+            [1, args.num_output_frames, 16, 60, 104], device=device, dtype=torch.bfloat16
+        )
 
     # Generate 81 frames
     video, latents = pipeline.inference(
