@@ -98,7 +98,7 @@ if args.i2v:
     ])
     dataset = TextImagePairDataset(args.data_path, transform=transform)
 else:
-    dataset = TextDataset(prompt_path=args.data_path, extended_prompt_path=args.extended_prompt_path)
+    dataset = TextDataset(prompt_path=args.data_path)
 num_prompts = len(dataset)
 print(f"Number of prompts: {num_prompts}")
 
