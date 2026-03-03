@@ -153,7 +153,14 @@ Then train the AR-diffusion model:
 
 > We recommend training no less than 2K steps, and more steps (e.g., 5~10K) will lead to better performance.
 
-
+Inference to test training results:
+```bash
+python inference.py \
+  --config_path configs/ar_diffusion_tf_{framewise OR chunkwise}.yaml \
+  --output_folder output/{framewise OR chunkwise}_ar_diffusion \
+  --checkpoint_path  checkpoints/{framewise OR chunkwise}/ar_diffusion.pt \
+  --data_path prompts/demos.txt
+```
 </details>
 
 
@@ -221,6 +228,9 @@ And then train ODE initialization models:
 
 > We recommend training no less than 1K steps, and more steps (e.g., 5~10K) will lead to better performance.
 
+Inference to test training results:
+
+The same as [here](#cli-inference).
 </details>
 
 
@@ -252,6 +262,10 @@ Since creating ODE-paired data is very time-consuming, we also provide an altern
   ```
 
 > We recommend training no less than 1K steps, and more steps (e.g., 3~5K) will lead to better performance.
+
+Inference to test training results:
+
+The same as [here](#cli-inference).
 </details>
 
 
