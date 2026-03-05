@@ -479,13 +479,14 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         text_prompts = None,
         initial_latent: Optional[torch.Tensor] = None,
         timestep_idx=0,
-        sampling_steps=48
+        sampling_steps=48,
+        chunksize = 3
     ) -> torch.Tensor:
         batch_size, num_frames, num_channels, height, width = noisy_input.shape
-        assert num_frames == 3
+        assert num_frames == chunksize
         if initial_latent is not None:
             num_input_frames = initial_latent.shape[1]
-            assert num_input_frames % 3 == 0
+            assert num_input_frames % chunksize == 0
             num_output_frames = num_frames + num_input_frames
         else:
             num_output_frames = num_frames
@@ -536,11 +537,11 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         
 
         if initial_latent is not None:
-            num_input_blocks = num_input_frames // 3
+            num_input_blocks = num_input_frames // chunksize
             for block_index in range(num_input_blocks):
                 current_ref_latents = \
-                    initial_latent[:, cache_start_frame:cache_start_frame + 3]
-                output[:, cache_start_frame:cache_start_frame + 3] = current_ref_latents
+                    initial_latent[:, cache_start_frame:cache_start_frame + chunksize]
+                output[:, cache_start_frame:cache_start_frame + chunksize] = current_ref_latents
                 self.generator(
                     noisy_image_or_video=current_ref_latents,
                     conditional_dict=conditional_dict,
@@ -559,8 +560,8 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     current_start=current_start_frame * self.frame_seq_length,
                     cache_start=cache_start_frame * self.frame_seq_length
                 )
-                current_start_frame += 3
-                cache_start_frame += 3
+                current_start_frame += chunksize
+                cache_start_frame += chunksize
 
     
         latents = noisy_input
@@ -568,7 +569,7 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         t = sample_scheduler.timesteps[timestep_idx]
         latent_model_input = latents
         timestep = t * torch.ones(
-            [batch_size, 3], device=noisy_input.device, dtype=torch.float32
+            [batch_size, chunksize], device=noisy_input.device, dtype=torch.float32
         )
         flow_pred_cond, _ = self.generator(
             noisy_image_or_video=latent_model_input,
