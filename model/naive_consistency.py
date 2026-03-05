@@ -104,24 +104,48 @@ class NaiveConsistency(BaseModel):
         
         pipeline = CausalDiffusionInferencePipeline(self.args, device=self.device,generator=self.teacher,text_encoder=self.text_encoder)
         latent_t_next = []
-        for chunk_idx in range(1,8):
-            if chunk_idx > 1:
-                initial_latent = clean_latent[:,:3*(chunk_idx-1)]
-            else:
-                initial_latent = None
-            
-            latent_t_i = latent_t[:, 3*(chunk_idx-1): 3*chunk_idx]
-            
-            latent_t_next_i = pipeline.inference_for_genuine_cd(
-                noisy_input=latent_t_i,
-                conditional_dict=conditional_dict,
-                unconditional_dict=unconditional_dict,
-                initial_latent=initial_latent,
-                timestep_idx=timestep_idx,
-                sampling_steps=self.discrete_cd_N
-            )
-            latent_t_next.append(latent_t_next_i)
         
+        if self.num_frame_per_block == 3:
+            # chunk-wise, hard-coded now
+            for chunk_idx in range(1,8):
+                if chunk_idx > 1:
+                    initial_latent = clean_latent[:,:3*(chunk_idx-1)]
+                else:
+                    initial_latent = None
+                
+                latent_t_i = latent_t[:, 3*(chunk_idx-1): 3*chunk_idx]
+                
+                latent_t_next_i = pipeline.inference_for_genuine_cd(
+                    noisy_input=latent_t_i,
+                    conditional_dict=conditional_dict,
+                    unconditional_dict=unconditional_dict,
+                    initial_latent=initial_latent,
+                    timestep_idx=timestep_idx,
+                    sampling_steps=self.discrete_cd_N,
+                    chunksize = 3
+                )
+                latent_t_next.append(latent_t_next_i)
+        else:
+            # frame-wise, hard-coded now
+            for chunk_idx in range(1,22):
+                if chunk_idx > 1:
+                    initial_latent = clean_latent[:,:chunk_idx-1]
+                else:
+                    initial_latent = None
+                
+                latent_t_i = latent_t[:, chunk_idx-1:chunk_idx]
+                
+                latent_t_next_i = pipeline.inference_for_genuine_cd(
+                    noisy_input=latent_t_i,
+                    conditional_dict=conditional_dict,
+                    unconditional_dict=unconditional_dict,
+                    initial_latent=initial_latent,
+                    timestep_idx=timestep_idx,
+                    sampling_steps=self.discrete_cd_N,
+                    chunksize = 1
+                )
+                latent_t_next.append(latent_t_next_i)
+                
         del pipeline
         import gc; gc.collect()
         torch.cuda.empty_cache()
