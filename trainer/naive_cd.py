@@ -121,7 +121,8 @@ class NaiveConsistency(BaseModel):
                     unconditional_dict=unconditional_dict,
                     initial_latent=initial_latent,
                     timestep_idx=timestep_idx,
-                    sampling_steps=self.discrete_cd_N
+                    sampling_steps=self.discrete_cd_N,
+                    chunksize = 3
                 )
                 latent_t_next.append(latent_t_next_i)
         else:
@@ -140,7 +141,8 @@ class NaiveConsistency(BaseModel):
                     unconditional_dict=unconditional_dict,
                     initial_latent=initial_latent,
                     timestep_idx=timestep_idx,
-                    sampling_steps=self.discrete_cd_N
+                    sampling_steps=self.discrete_cd_N,
+                    chunksize = 1
                 )
                 latent_t_next.append(latent_t_next_i)
                 
