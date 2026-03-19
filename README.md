@@ -337,7 +337,7 @@ Such models are the final models used to generate videos.
 For more details, see [here](https://zhuanlan.zhihu.com/p/2002114039493461457). (currently in Chinese)
 
 ## Acknowledgements
-This codebase is built on top of the open-source implementation of [CausVid](https://github.com/tianweiy/CausVid), [Self Forcing](https://github.com/guandeh17/Self-Forcing), [Rolling Forcing](https://github.com/TencentARC/RollingForcing) and the [Wan2.1](https://github.com/Wan-Video/Wan2.1) repo.
+This codebase is built on top of the open-source implementation of [CausVid](https://github.com/tianweiy/CausVid), [Self Forcing](https://github.com/guandeh17/Self-Forcing), [Rolling Forcing](https://github.com/TencentARC/RollingForcing) and the [Wan2.1](https://github.com/Wan-Video/Wan2.1) repo. Thanks to @chijw for improving the EMA mechanism.
 
 ## References
 If you find the method useful, please cite
