@@ -245,6 +245,8 @@ Since creating ODE-paired data is very time-consuming, we also provide an altern
 
 **Note:** The current CD is still in an early stage, with many suboptimal implementations in both the algorithm and (especially) infra efficiency. We’ll continue iterating and improving it.
 
+> Thanks to [@chijw's effort](https://github.com/thu-ml/Causal-Forcing/pull/20), now the EMA mechanism is more efficient!
+
 - Frame-wise:
   ```bash
   torchrun --nnodes=8 --nproc_per_node=8 --rdzv_id=5235 \
