@@ -318,7 +318,7 @@ And then train DMD models:
 
 Such models are the final models used to generate videos.
 ## FAQ & Blog 
-See [here](https://my.feishu.cn/wiki/AjBSwcjpqiN0ECkodIWcGDcMn4e) and [here](https://zhuanlan.zhihu.com/p/2002114039493461457). (currently in Chinese)
+See the [FAQ](https://my.feishu.cn/wiki/AjBSwcjpqiN0ECkodIWcGDcMn4e) and the [blog](https://zhuanlan.zhihu.com/p/2002114039493461457). (currently in Chinese)
 
 **Why using bidirectional teacher in the DMD stage ?**
 - Q: In the DMD stage, do you still use a bidirectional teacher? Why not an AR teacher?
