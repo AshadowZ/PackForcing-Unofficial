@@ -170,7 +170,7 @@ python inference.py \
 <details>
 <summary> Stage 2: Causal ODE Initialization (Can skip by using our pretrained checkpoints. Click to expand.)</summary>
 
-🔥You can use `bf16` to accelerate generation, which can achieve nearly 2x speedup with almost no loss.
+🔥You can use `bf16` to accelerate generation.
 
 If you have skipped Stage 1, you need to download the pretrained models:
 ```bash
