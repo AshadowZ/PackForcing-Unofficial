@@ -170,6 +170,8 @@ python inference.py \
 <details>
 <summary> Stage 2: Causal ODE Initialization (Can skip by using our pretrained checkpoints. Click to expand.)</summary>
 
+🔥You can use `bf16` to accelerate generation, which can achieve double the speedup with almost no loss.
+
 If you have skipped Stage 1, you need to download the pretrained models:
 ```bash
 hf download zhuhz22/Causal-Forcing framewise/ar_diffusion.pt --local-dir checkpoints
