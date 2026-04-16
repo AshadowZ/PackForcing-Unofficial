@@ -39,11 +39,10 @@ https://github.com/user-attachments/assets/310f0cfa-e1bb-496d-8941-87f77b3271c0
 
 
 ## 🔥 News
-- **2026.3.15** : [Rolling Sink](https://github.com/haodong2000/RollingSink) adopts Causal Forcing as one of the base models!
+- **2026.4.16**: Optimize the Stage 2 consistency distillation infrastructure for **3×** faster training.
+- **2026.3.15** : [Rolling Sink](https://github.com/haodong2000/RollingSink), [Infinity-RoPE](https://github.com/yesiltepe-hidir/infinity-rope) and [Deep Forcing](https://cvlab-kaist.github.io/DeepForcing/) adopt Causal Forcing as one of the base models!
 - **2026.2.28** : Add [FAQ section](#faq--blog) regarding hot topics, specifically which is the better Initialization between AR diffusion and causal ODE distillation.
 - **2026.2.11** : We now support **I2V** generation! Feel free to try it [here](#new-i2v)!
-- **2026.2.9** : [Infinity-RoPE](https://github.com/yesiltepe-hidir/infinity-rope) adopts Causal Forcing as one of the base models!
-- **2026.2.8** : [Deep Forcing](https://cvlab-kaist.github.io/DeepForcing/) adopts Causal Forcing as one of the base models!
 - **2026.2.7** : Causal Forcing now supports [Rolling Forcing](https://github.com/TencentARC/RollingForcing), enabling minute-level long video generation!
 - **2026.2.5** : Release causal consistency distillation (Preview) as substitute for ODE distillation, **free of generating ODE paired data**!
 - **2026.2.2** : The [paper](https://arxiv.org/abs/2602.02214), [project page](https://thu-ml.github.io/CausalForcing.github.io/), and code are released.
@@ -244,8 +243,6 @@ The same as [here](#cli-inference).
 <summary> 🔥 NEW: Substitute for Stage 2, without creating ODE paired data: Causal CD (Click to expand.)</summary>     
 <br>
 Since creating ODE-paired data is very time-consuming, we also provide an alternative here that achieves the same effect as ODE distillation while requiring only ground-truth data.
-
-**Note:** The current CD is still in an early stage, with many suboptimal implementations in both the algorithm and (especially) infra efficiency. We’ll continue iterating and improving it.
 
 > Thanks to [@chijw's effort](https://github.com/thu-ml/Causal-Forcing/pull/20), now the EMA mechanism is more efficient!
 
