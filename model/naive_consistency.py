@@ -90,78 +90,40 @@ class NaiveConsistency(BaseModel):
             ema_model
         ) -> Tuple[torch.Tensor, dict]:
         
-        clean_latent=clean_latent.to(self.device).to(torch.bfloat16)
-        timestep_idx = random.randrange(self.discrete_cd_N-1) 
-        
-        t=self.scheduler.timesteps[timestep_idx]
-        
-        timestep = t * \
-            torch.ones([1, 21], device=self.device, dtype=torch.bfloat16)
-        
-        noise = torch.randn_like(clean_latent).to(self.device)
-        latent_t = self.scheduler.add_noise(clean_latent,noise=noise,timestep=t*torch.ones([1]).to(self.device)).to(torch.bfloat16)
-        
-        
-        pipeline = CausalDiffusionInferencePipeline(self.args, device=self.device,generator=self.teacher,text_encoder=self.text_encoder)
-        latent_t_next = []
-        
-        if self.num_frame_per_block == 3:
-            # chunk-wise, hard-coded now
-            for chunk_idx in range(1,8):
-                if chunk_idx > 1:
-                    initial_latent = clean_latent[:,:3*(chunk_idx-1)]
-                else:
-                    initial_latent = None
-                
-                latent_t_i = latent_t[:, 3*(chunk_idx-1): 3*chunk_idx]
-                
-                latent_t_next_i = pipeline.inference_for_genuine_cd(
-                    noisy_input=latent_t_i,
-                    conditional_dict=conditional_dict,
-                    unconditional_dict=unconditional_dict,
-                    initial_latent=initial_latent,
-                    timestep_idx=timestep_idx,
-                    sampling_steps=self.discrete_cd_N,
-                    chunksize = 3
-                )
-                latent_t_next.append(latent_t_next_i)
-        else:
-            # frame-wise, hard-coded now
-            for chunk_idx in range(1,22):
-                if chunk_idx > 1:
-                    initial_latent = clean_latent[:,:chunk_idx-1]
-                else:
-                    initial_latent = None
-                
-                latent_t_i = latent_t[:, chunk_idx-1:chunk_idx]
-                
-                latent_t_next_i = pipeline.inference_for_genuine_cd(
-                    noisy_input=latent_t_i,
-                    conditional_dict=conditional_dict,
-                    unconditional_dict=unconditional_dict,
-                    initial_latent=initial_latent,
-                    timestep_idx=timestep_idx,
-                    sampling_steps=self.discrete_cd_N,
-                    chunksize = 1
-                )
-                latent_t_next.append(latent_t_next_i)
-                
-        del pipeline
-        import gc; gc.collect()
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-        
-        latent_t_next = torch.cat(latent_t_next, dim=1)
-        
-        
-        
-        
+        clean_latent = clean_latent.to(self.device).to(torch.bfloat16)
+        B, num_frames = clean_latent.shape[:2]
+        timestep_idx = random.randrange(self.discrete_cd_N - 1)
+
+        t = self.scheduler.timesteps[timestep_idx]
+        timestep = t * torch.ones([B, num_frames], device=self.device, dtype=torch.bfloat16)
         t_next = self.scheduler.timesteps[timestep_idx + 1]
-        timestep_next = t_next * \
-            torch.ones([1, 21], device=self.device, dtype=torch.bfloat16)
+        timestep_next = t_next * torch.ones([B, num_frames], device=self.device, dtype=torch.bfloat16)
+        
+        noise = torch.randn_like(clean_latent)
+        latent_t = self.scheduler.add_noise(
+            clean_latent, noise=noise,
+            timestep=t * torch.ones([1], device=self.device)
+        ).to(torch.bfloat16)
+
+        # Full-frame teacher forward (replaces per-frame loop)
+        with torch.no_grad():
+            v_cond, _ = self.teacher(
+                latent_t, conditional_dict, timestep, clean_x=clean_latent)
+            v_uncond, _ = self.teacher(
+                latent_t, unconditional_dict, timestep, clean_x=clean_latent)
+            v_pred = v_uncond + self.guidance_scale * (
+                v_cond - v_uncond)
+            dt = (timestep - timestep_next).reshape(B, num_frames, 1, 1, 1)
+            dt /= 1000
+            latent_t_next = latent_t - dt * v_pred
+
+        # Share block_mask to avoid redundant allocation
+        if self.generator.model.block_mask is None and self.teacher.model.block_mask is not None:
+            self.generator.model.block_mask = self.teacher.model.block_mask
+            self.generator_ema.model.block_mask = self.teacher.model.block_mask
+
+        
         print(f't:{t}; t_next: {t_next}')
-        
-        
         
         _, cm_pred_t = self.generator(
             latent_t, conditional_dict, timestep, clean_x = clean_latent
