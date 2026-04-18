@@ -116,7 +116,8 @@ Built on [Rolling Forcing](https://github.com/TencentARC/RollingForcing), we imp
 [Infinity-RoPE](https://github.com/yesiltepe-hidir/infinity-rope), [Deep Forcing](https://cvlab-kaist.github.io/DeepForcing/) and [Rolling Sink](https://github.com/haodong2000/RollingSink) also adopt Causal Forcing as one of their base models, enabling interactive (prompt-switchable) long video generation at the minute scale. You can also try them out at their repos.
 
 ## Training
-<img width="4944" height="2154" alt="overview" src="https://github.com/user-attachments/assets/df96fae3-cecc-4915-9a14-d1a5f326074e" />
+
+<img width="2490" height="1050" alt="overview" src="https://github.com/user-attachments/assets/df96fae3-cecc-4915-9a14-d1a5f326074e" />
 
 <details>
 <summary> Stage 1: Autoregressive Diffusion Training (Can skip by using our pretrained checkpoints. Click to expand.)</summary>
