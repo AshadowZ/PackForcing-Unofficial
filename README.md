@@ -168,7 +168,7 @@ python inference.py \
 
 
 <details>
-<summary> Stage 2: Causal ODE Initialization (Can skip by using our pretrained checkpoints. Click to expand.)</summary>
+<summary> Stage 2 (Option a): Causal ODE Initialization (Can skip by using our pretrained checkpoints. Click to expand.)</summary>
 
 🔥You can use `bf16` to accelerate generation.
 
@@ -240,8 +240,7 @@ The same as [here](#cli-inference).
 
 
 
-<details>
-<summary> 🔥 NEW: Substitute for Stage 2, without creating ODE paired data: Causal CD (Click to expand.)</summary>     
+### 🔥 Stage 2 (Option b): Causal Consistency Distillation (CD) Initialization
 <br>
 Since creating ODE-paired data is very time-consuming, we also provide an alternative here that achieves the same effect as ODE distillation while requiring only ground-truth data.
 
