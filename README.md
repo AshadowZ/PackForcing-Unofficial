@@ -241,8 +241,7 @@ The same as [here](#cli-inference).
 
 
 ### 🔥 Stage 2 (Option b): Causal Consistency Distillation (CD) Initialization
-<br>
-Since creating ODE-paired data is very time-consuming, we also provide an alternative here that achieves the same effect as ODE distillation while requiring only ground-truth data.
+Since creating ODE-paired data is very time-consuming, we also provide an alternative here that achieves the same effect (or better) as ODE distillation while requiring only ground-truth data, **free of generating ODE data!**
 
 > Thanks to [@chijw's effort](https://github.com/thu-ml/Causal-Forcing/pull/20), now the EMA mechanism is more efficient!
 
