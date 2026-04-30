@@ -39,7 +39,7 @@ https://github.com/user-attachments/assets/310f0cfa-e1bb-496d-8941-87f77b3271c0
 
 
 ## 🔥 News
-- **2026.4.16**: **Optimize the Stage 2 🔥consistency distillation🔥 infrastructure for 3× faster training, let's try it now!**
+- **2026.4.16**: **Optimize the Stage 2 🔥consistency distillation🔥 infrastructure for 3× faster training, let's try it now!** We have also released the ckpt.
 - **2026.3.15** : [Rolling Sink](https://github.com/haodong2000/RollingSink), [Infinity-RoPE](https://github.com/yesiltepe-hidir/infinity-rope) and [Deep Forcing](https://cvlab-kaist.github.io/DeepForcing/) adopt Causal Forcing as one of the base models!
 - **2026.2.28** : Add [FAQ section](#faq--blog) regarding hot topics, specifically which is the better Initialization between AR diffusion and causal ODE distillation.
 - **2026.2.11** : We now support **I2V** generation! Feel free to try it [here](#new-i2v)!
@@ -265,6 +265,12 @@ Since creating ODE-paired data is very time-consuming, we also provide an altern
   ```
 
 > We recommend training no less than 3K steps, and more steps (e.g., 5K) will lead to better performance.
+
+You can also download the checkpoints directly:
+```bash
+hf download zhuhz22/Causal-Forcing framewise/causal_cd.pt --local-dir checkpoints
+hf download zhuhz22/Causal-Forcing chunkwise/causal_cd.pt --local-dir checkpoints
+```
 
 Inference to test training results:
 
