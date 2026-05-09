@@ -1,42 +1,108 @@
-from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
-from utils.scheduler import FlowMatchScheduler
-from utils.distributed import launch_distributed_job
-
-import torch.distributed as dist
-from tqdm import tqdm
 import argparse
-import torch
 import math
 import os
+
+import torch
+import torch.distributed as dist
+from tqdm import tqdm
+
 from utils.dataset import LatentLMDBDataset
+from utils.distributed import launch_distributed_job
+from utils.ode_generation import (
+    CausalODETrajectoryGenerator,
+    merge_cfg_prompt_embeds,
+)
+from utils.scheduler import FlowMatchScheduler
+from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder
 
-def init_model(device):
+
+DEFAULT_NEGATIVE_PROMPT = (
+    "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
+    "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，"
+    "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，"
+    "杂乱的背景，三条腿，背景人很多，倒着走"
+)
+DEFAULT_NUM_FRAME_PER_BLOCK = 3
+DEFAULT_NUM_INFERENCE_STEPS = 48
+DEFAULT_SCHEDULER_SHIFT = 5.0
+DEFAULT_TARGET_NUM_FRAMES = 21
+DEFAULT_TRAJECTORY_INDICES = [0, 12, 24, 36, -2, -1]
+
+
+def normalize_generator_state_dict(state_dict: dict) -> dict:
+    if "generator" in state_dict:
+        state_dict = state_dict["generator"]
+    elif "generator_ema" in state_dict:
+        state_dict = state_dict["generator_ema"]
+
+    fixed = {}
+    for k, v in state_dict.items():
+        if k.startswith("model._fsdp_wrapped_module."):
+            k = k.replace("model._fsdp_wrapped_module.", "", 1)
+        if k.startswith("model."):
+            k = k.replace("model.", "", 1)
+        fixed[k] = v
+    return fixed
+
+
+def init_model(
+    device,
+    num_frame_per_block: int,
+    scheduler_shift: float,
+    num_inference_steps: int,
+    negative_prompt: str,
+):
     model = WanDiffusionWrapper(is_causal=True).to(device).to(torch.float32)
-    model.model.num_frame_per_block = 3 # !!
+    model.model.num_frame_per_block = num_frame_per_block
     encoder = WanTextEncoder().to(device).to(torch.float32)
-    
 
-    scheduler = FlowMatchScheduler(shift=5.0, sigma_min=0.0, extra_one_step=True)
-    scheduler.set_timesteps(num_inference_steps=48, denoising_strength=1.0)
+    scheduler = FlowMatchScheduler(
+        shift=scheduler_shift,
+        sigma_min=0.0,
+        extra_one_step=True,
+    )
+    scheduler.set_timesteps(
+        num_inference_steps=num_inference_steps,
+        denoising_strength=1.0,
+    )
     scheduler.sigmas = scheduler.sigmas.to(device)
 
-    sample_neg_prompt = '色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走'
-
-    unconditional_dict = encoder(
-        text_prompts=[sample_neg_prompt]
-    )
-
+    unconditional_dict = encoder(text_prompts=[negative_prompt])
     return model, encoder, scheduler, unconditional_dict
+
+
+def prepare_clean_latent(
+    sample: dict,
+    target_num_frames: int | None,
+    device,
+) -> torch.Tensor:
+    clean_latent = sample["clean_latent"].to(device).unsqueeze(0)
+    if target_num_frames is None:
+        return clean_latent
+
+    if clean_latent.shape[1] < target_num_frames:
+        raise ValueError(
+            "clean_latent has fewer frames than requested: "
+            f"{clean_latent.shape[1]} < {target_num_frames}"
+        )
+    if clean_latent.shape[1] != target_num_frames:
+        clean_latent = clean_latent[:, :target_num_frames, ...]
+    return clean_latent.contiguous()
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int, default=-1)
-    parser.add_argument("--output_folder", type=str)
-    parser.add_argument("--rawdata_path", type=str)
-    parser.add_argument("--generator_ckpt", type=str)
+    parser.add_argument("--output_folder", type=str, required=True)
+    parser.add_argument("--rawdata_path", type=str, required=True)
+    parser.add_argument("--generator_ckpt", type=str, required=True)
     parser.add_argument("--guidance_scale", type=float, default=6.0)
-
+    parser.add_argument(
+        "--generation_mode",
+        type=str,
+        default="full",
+        choices=["full", "blockwise_kv"],
+    )
 
     args = parser.parse_args()
 
@@ -49,88 +115,70 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    model, encoder, scheduler, unconditional_dict = init_model(device=device)
+    model, encoder, scheduler, unconditional_dict = init_model(
+        device=device,
+        num_frame_per_block=DEFAULT_NUM_FRAME_PER_BLOCK,
+        scheduler_shift=DEFAULT_SCHEDULER_SHIFT,
+        num_inference_steps=DEFAULT_NUM_INFERENCE_STEPS,
+        negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+    )
     state_dict = torch.load(args.generator_ckpt, map_location="cpu")
-        
-    gen_sd = state_dict["generator"]
-    fixed = {}
-    for k, v in gen_sd.items():
-        if k.startswith("model._fsdp_wrapped_module."):
-            k = k.replace("model._fsdp_wrapped_module.", "", 1)
-        if k.startswith("model."):
-            k = k.replace("model.", "", 1)
-        fixed[k] = v
-    state_dict = fixed
     model.model.load_state_dict(
-        state_dict, strict=True
+        normalize_generator_state_dict(state_dict),
+        strict=True,
     )
 
-
-
-    dataset = LatentLMDBDataset(args.rawdata_path)
+    dataset = LatentLMDBDataset(
+        args.rawdata_path,
+        max_pair=int(1e8),
+    )
 
     if global_rank == 0:
         os.makedirs(args.output_folder, exist_ok=True)
-        
+
+    trajectory_generator = CausalODETrajectoryGenerator(
+        model=model,
+        scheduler=scheduler,
+        num_frame_per_block=DEFAULT_NUM_FRAME_PER_BLOCK,
+        num_inference_steps=DEFAULT_NUM_INFERENCE_STEPS,
+        guidance_scale=args.guidance_scale,
+    )
+
     total_steps = int(math.ceil(len(dataset) / dist.get_world_size()))
     for index in tqdm(
-        range(total_steps), disable=(dist.get_rank() != 0),
+        range(total_steps), disable=(global_rank != 0),
     ):
-        prompt_index = index * dist.get_world_size() + dist.get_rank()
+        prompt_index = index * dist.get_world_size() + global_rank
         if prompt_index >= len(dataset):
             continue
+
+        output_path = os.path.join(args.output_folder, f"{prompt_index:05d}.pt")
+
         sample = dataset[prompt_index]
         prompt = sample["prompts"]
-       
-        clean_latent = sample["clean_latent"].to(device).unsqueeze(0)
-        
-        
-
-        conditional_dict = encoder(
-            text_prompts=prompt
+        clean_latent = prepare_clean_latent(
+            sample=sample,
+            target_num_frames=DEFAULT_TARGET_NUM_FRAMES,
+            device=device,
         )
 
-        latents = torch.randn(
-            [1, 21, 16, 60, 104], dtype=torch.float32, device=device
+        conditional_dict = encoder(text_prompts=[prompt])
+        paired_conditional_dict = merge_cfg_prompt_embeds(
+            conditional_dict=conditional_dict,
+            unconditional_dict=unconditional_dict,
         )
-        
-        noisy_input = []
-
-        for progress_id, t in enumerate(tqdm(scheduler.timesteps, disable=(dist.get_rank() != 0))):
-            timestep = t * \
-                torch.ones([1, 21], device=device, dtype=torch.float32)
-            noisy_input.append(latents)
-            f_cond, x0_pred_cond = model(
-                latents, conditional_dict, timestep, clean_x = clean_latent
-            )
-
-            f_uncond, x0_pred_uncond = model(
-                latents, unconditional_dict, timestep, clean_x = clean_latent
-            )
-
-            flow_pred = f_uncond + args.guidance_scale * (
-                f_cond - f_uncond
-            )
-            
-            
-            latents = scheduler.step(
-                flow_pred.flatten(0, 1),
-                timestep.flatten(0, 1),
-                latents.flatten(0, 1)
-            ).unflatten(dim=0, sizes=flow_pred.shape[:2])
-
-        noisy_input.append(latents)
-        noisy_input.append(clean_latent)
-        
-        noisy_inputs = torch.stack(noisy_input, dim=1)
-
-        noisy_inputs = noisy_inputs[:, [0, 12, 24, 36, -2, -1]]
-
-        stored_data = noisy_inputs
+        initial_noise = torch.randn_like(clean_latent, dtype=torch.float32)
+        stored_data = trajectory_generator.generate(
+            clean_latent=clean_latent,
+            paired_conditional_dict=paired_conditional_dict,
+            trajectory_indices=DEFAULT_TRAJECTORY_INDICES,
+            generation_mode=args.generation_mode,
+            initial_noise=initial_noise,
+        )
 
         torch.save(
             {prompt: stored_data.cpu().detach()},
-            os.path.join(args.output_folder, f"{prompt_index:05d}.pt")
+            output_path,
         )
 
     dist.barrier()
