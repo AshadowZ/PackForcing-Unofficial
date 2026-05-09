@@ -330,13 +330,32 @@ class WanDiffusionWrapperDeepForcing(WanDiffusionWrapper):
             timestep_shift=8.0,
             is_causal=False,
             local_attn_size=-1,
-            sink_size=0
+            sink_size=0,
+            pc_enable=False,
+            budget=16,
+            recent=4,
+            pc_fusion="sum",
+            pc_keep_sinks=True,
+            pc_topc_max_reuse=7,
+            pc_mid_rope_unification=False,
+            pc_bootstrap_delta=False,
     ):
         nn.Module.__init__(self)
 
         if is_causal:
             self.model = CausalWanModelDeepForcing.from_pretrained(
-                wan_model_path(model_name), local_attn_size=local_attn_size, sink_size=sink_size)
+                wan_model_path(model_name),
+                local_attn_size=local_attn_size,
+                sink_size=sink_size,
+                PC_enable=pc_enable,
+                PC_capacity=1560 * budget,
+                PC_window=1560 * recent,
+                PC_fusion=pc_fusion,
+                PC_keep_sinks=pc_keep_sinks,
+                PC_topc_max_reuse=pc_topc_max_reuse,
+                PC_mid_rope_unification=pc_mid_rope_unification,
+                PC_bootstrap_delta=pc_bootstrap_delta,
+            )
         else:
             self.model = WanModel.from_pretrained(wan_model_path(model_name))
         self.model.eval()

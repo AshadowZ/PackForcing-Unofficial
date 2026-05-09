@@ -33,6 +33,11 @@ complexity.
 - Treat long-video behavior as an ablation problem.
 - Avoid large coupled changes that make failures hard to attribute.
 
+## Debug Notes
+
+- Read `docs/deepforcing_debug.md` before changing the current DeepForcing
+  sink-only / sink-mid baseline behavior.
+
 ## Commit Format
 
 Use short Conventional Commit-style messages:

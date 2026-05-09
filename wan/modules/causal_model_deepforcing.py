@@ -87,6 +87,177 @@ def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
     return torch.stack(output).type_as(x)
 
 
+class PCConfig:
+    def __init__(self, enable=False, capacity=1560 * 15, window=1560 * 4,
+                 fusion="sum", keep_sinks=True, topc_max_reuse=0,
+                 mid_rope_unification=False, bootstrap_delta=False):
+        self.enable = enable
+        self.capacity = int(capacity)
+        self.window = int(window)
+        self.fusion = fusion
+        self.keep_sinks = keep_sinks
+        self.topc_max_reuse = max(0, int(topc_max_reuse))
+        self.mid_rope_unification = bool(mid_rope_unification)
+        self.bootstrap_delta = bool(bootstrap_delta)
+
+
+def _mkv_update_win_q(kv_cache, new_win_q, window_tokens):
+    new_win_q = new_win_q.detach()
+    if "win_q" not in kv_cache or kv_cache["win_q"] is None:
+        kv_cache["win_q"] = new_win_q
+    else:
+        kv_cache["win_q"] = torch.cat([kv_cache["win_q"], new_win_q], dim=1)
+    if kv_cache["win_q"].shape[1] > window_tokens:
+        kv_cache["win_q"] = kv_cache["win_q"][:, -window_tokens:]
+
+
+def _mkv_select_indices(scores_fused, total_tokens, recent_tokens, sink_tokens, top_c,
+                        device, topc_counts=None, topc_max_reuse=0):
+    batch_size = scores_fused.shape[0]
+    keep_lists = []
+    protect_lists = []
+    topc_selected_lists = []
+    recent_idx = torch.arange(max(0, total_tokens - recent_tokens), total_tokens, device=device)
+    sink_idx = (
+        torch.arange(0, sink_tokens, device=device)
+        if sink_tokens > 0 else torch.tensor([], device=device, dtype=torch.long)
+    )
+
+    old_end = max(0, total_tokens - recent_tokens)
+    cand_start = min(sink_tokens, old_end)
+    cand_len = max(0, old_end - cand_start)
+    if cand_len == 0 or top_c <= 0:
+        for _ in range(batch_size):
+            keep_lists.append(torch.cat([sink_idx, recent_idx]).clone())
+            protect_lists.append(torch.tensor([], device=device, dtype=torch.long))
+            topc_selected_lists.append(torch.tensor([], device=device, dtype=torch.long))
+        return keep_lists, protect_lists, topc_selected_lists
+
+    candidate_idx = torch.arange(cand_start, old_end, device=device)
+    k = min(int(top_c), cand_len)
+
+    for batch_idx in range(batch_size):
+        scores_b = scores_fused[batch_idx, cand_start:old_end]
+        counts_b = None
+        if topc_counts is not None:
+            counts_b = topc_counts[batch_idx, cand_start:old_end]
+
+        if counts_b is not None and topc_max_reuse > 0:
+            valid_mask = counts_b < topc_max_reuse
+            if not torch.any(valid_mask):
+                selected_b = torch.tensor([], device=device, dtype=torch.long)
+            else:
+                allowed_scores = scores_b[valid_mask]
+                allowed_idx = candidate_idx[valid_mask]
+                k_eff = min(k, allowed_idx.numel())
+                if k_eff > 0:
+                    _, top_local = torch.topk(allowed_scores, k=k_eff, dim=0)
+                    selected_b = torch.sort(allowed_idx[top_local])[0]
+                else:
+                    selected_b = torch.tensor([], device=device, dtype=torch.long)
+        else:
+            k_eff = min(k, candidate_idx.numel())
+            if k_eff > 0:
+                _, top_local = torch.topk(scores_b, k=k_eff, dim=0)
+                selected_b = torch.sort(candidate_idx[top_local])[0]
+            else:
+                selected_b = torch.tensor([], device=device, dtype=torch.long)
+
+        protect_b = torch.unique(selected_b, sorted=True)
+        keep_b = torch.unique(torch.cat([sink_idx, protect_b, recent_idx]), sorted=True)
+        keep_lists.append(keep_b)
+        protect_lists.append(protect_b)
+        topc_selected_lists.append(protect_b)
+
+    return keep_lists, protect_lists, topc_selected_lists
+
+
+def _mkv_prune_cache(
+    kv_cache,
+    keep_lists,
+    protect_lists,
+    sink_tokens,
+    topc_selected_lists=None,
+    topc_max_reuse=0,
+    source_k=None,
+    source_v=None,
+    source_abs=None,
+    source_topc_counts=None,
+):
+    key_dst = kv_cache["k"]
+    val_dst = kv_cache["v"]
+    key_src = source_k if source_k is not None else key_dst
+    val_src = source_v if source_v is not None else val_dst
+    batch_size, cache_capacity, num_heads, head_dim = key_dst.shape
+    device = key_dst.device
+    max_keep = max([len(idx) for idx in keep_lists]) if keep_lists else 0
+
+    new_key = torch.zeros((batch_size, max_keep, num_heads, head_dim), dtype=key_dst.dtype, device=device)
+    new_val = torch.zeros((batch_size, max_keep, num_heads, head_dim), dtype=val_dst.dtype, device=device)
+    new_mask = torch.zeros((batch_size, max_keep), dtype=torch.bool, device=device)
+    abs_idx = kv_cache.get("abs_frame_idx", None)
+    abs_src = source_abs if source_abs is not None else abs_idx
+    topc_counts = kv_cache.get("topc_select_counts", None)
+    counts_src = source_topc_counts if source_topc_counts is not None else topc_counts
+
+    new_counts = None
+    if topc_counts is not None:
+        new_counts = torch.zeros_like(topc_counts)
+    if abs_idx is not None:
+        new_abs = torch.full((batch_size, max_keep), -1, dtype=abs_idx.dtype, device=device)
+
+    for batch_idx in range(batch_size):
+        idx = keep_lists[batch_idx]
+        keep_len = len(idx)
+        if keep_len == 0:
+            continue
+        new_key[batch_idx, :keep_len] = key_src[batch_idx, idx]
+        new_val[batch_idx, :keep_len] = val_src[batch_idx, idx]
+        if abs_idx is not None and abs_src is not None:
+            new_abs[batch_idx, :keep_len] = abs_src[batch_idx, idx]
+        if new_counts is not None and counts_src is not None:
+            new_counts[batch_idx, :keep_len] = counts_src[batch_idx, idx]
+            if topc_max_reuse > 0 and topc_selected_lists is not None:
+                selected = topc_selected_lists[batch_idx]
+                if selected.numel() > 0:
+                    selected_set = set(selected.tolist())
+                    for pos_new, pos_old in enumerate(idx.tolist()):
+                        if pos_old in selected_set:
+                            new_counts[batch_idx, pos_new] += 1
+        protect = protect_lists[batch_idx]
+        if protect.numel() > 0:
+            keep_list = idx.tolist()
+            protect_set = set(protect.tolist())
+            protect_positions = [pos for pos, old_idx in enumerate(keep_list) if old_idx in protect_set]
+            if protect_positions:
+                new_mask[batch_idx, torch.tensor(protect_positions, device=device)] = True
+
+    key_dst.zero_()
+    val_dst.zero_()
+    if max_keep > 0:
+        key_dst[:, :max_keep] = new_key[:, :max_keep]
+        val_dst[:, :max_keep] = new_val[:, :max_keep]
+
+    if abs_idx is not None:
+        abs_idx.fill_(-1)
+        if max_keep > 0:
+            abs_idx[:, :max_keep] = new_abs[:, :max_keep]
+
+    if new_counts is not None:
+        topc_counts.zero_()
+        topc_counts[:, :max_keep] = new_counts[:, :max_keep]
+
+    kv_cache["local_end_index"].fill_(max_keep)
+    kv_cache["protected_mask"] = torch.zeros((batch_size, cache_capacity), dtype=torch.bool, device=device)
+    kv_cache["protected_mask"][:, :max_keep] = new_mask
+    kv_cache["protected_len"] = kv_cache["protected_mask"].sum(dim=1).to(torch.long)
+    kv_cache["protected_len_max"] = (
+        kv_cache["protected_len"].max()
+        if kv_cache["protected_len"].numel() > 0
+        else torch.tensor(0, dtype=torch.long, device=device)
+    )
+
+
 class CausalWanSelfAttentionDeepForcing(nn.Module):
 
     def __init__(self,
@@ -95,7 +266,8 @@ class CausalWanSelfAttentionDeepForcing(nn.Module):
                  local_attn_size=-1,
                  sink_size=0,
                  qk_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 PC: PCConfig | None = None):
         assert dim % num_heads == 0
         super().__init__()
         self.dim = dim
@@ -106,6 +278,7 @@ class CausalWanSelfAttentionDeepForcing(nn.Module):
         self.qk_norm = qk_norm
         self.eps = eps
         self.max_attention_size = 32760 if local_attn_size == -1 else local_attn_size * 1560
+        self.PC = PC or PCConfig(enable=False)
 
         # layers
         self.q = nn.Linear(dim, dim)
@@ -235,66 +408,305 @@ class CausalWanSelfAttentionDeepForcing(nn.Module):
             sink_tokens_v = self.sink_size * frame_seqlen
             kv_cache_size = kv_cache["k"].shape[1]
             num_new_tokens = roped_query.shape[1]
-            if self.local_attn_size != -1 and (current_end > kv_cache["global_end_index"].item()) and (
-                    num_new_tokens + kv_cache["local_end_index"].item() > kv_cache_size):
-                num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
-                num_rolled_tokens = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
-                num_rolled_tokens_v = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens_v
-                kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                    kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-                kv_cache["v"][:, sink_tokens_v:sink_tokens_v + num_rolled_tokens_v] = \
-                    kv_cache["v"][:, sink_tokens_v + num_evicted_tokens:sink_tokens_v + num_evicted_tokens + num_rolled_tokens_v].clone()
-                local_end_index = kv_cache["local_end_index"].item() + current_end - \
-                    kv_cache["global_end_index"].item() - num_evicted_tokens
-                local_start_index = local_end_index - num_new_tokens
-                kv_cache["k"][:, local_start_index:local_end_index] = roped_key
-                kv_cache["v"][:, local_start_index:local_end_index] = v
-            else:
-                local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
-                local_start_index = local_end_index - num_new_tokens
-                kv_cache["k"][:, local_start_index:local_end_index] = roped_key
-                kv_cache["v"][:, local_start_index:local_end_index] = v
+            prev_local_end = kv_cache["local_end_index"].item()
+            batch_cache = kv_cache["k"].shape[0]
+            if "abs_frame_idx" not in kv_cache:
+                kv_cache["abs_frame_idx"] = torch.full(
+                    (kv_cache["k"].shape[0], kv_cache_size),
+                    -1,
+                    dtype=torch.long,
+                    device=kv_cache["k"].device,
+                )
+            abs_frame_idx = kv_cache["abs_frame_idx"]
+            if "topc_select_counts" not in kv_cache:
+                kv_cache["topc_select_counts"] = torch.zeros(
+                    (kv_cache["k"].shape[0], kv_cache_size),
+                    dtype=torch.long,
+                    device=kv_cache["k"].device,
+                )
+            topc_select_counts = kv_cache["topc_select_counts"]
+            token_offsets_new = torch.arange(num_new_tokens, device=kv_cache["k"].device)
+            new_abs_frames = current_start_frame + torch.div(token_offsets_new, frame_seqlen, rounding_mode='floor')
+            new_abs_frames = new_abs_frames.to(abs_frame_idx.dtype)
+            rolled_condition = self.local_attn_size != -1 and (current_end > kv_cache["global_end_index"].item()) and (
+                num_new_tokens + prev_local_end > kv_cache_size
+            )
+            available_slots = kv_cache_size - prev_local_end
+            need_evict = False
+            new_tokens_integrated = False
 
-            key_win = kv_cache["k"][:, max(0, local_end_index - self.max_attention_size):local_end_index]
-            val_win = kv_cache["v"][:, max(0, local_end_index - self.max_attention_size):local_end_index]
+            if self.PC.enable:
+                _mkv_update_win_q(kv_cache, roped_query, window_tokens=self.PC.window)
 
-            if self.local_attn_size != -1 and (current_end > kv_cache["global_end_index"].item()) and (
-                    num_new_tokens + kv_cache["local_end_index"].item() > kv_cache_size):
-                sink_len_tokens = min(kv_cache["local_end_index"].item(), sink_tokens)
-
-                tail_end = local_end_index
-                tail_start = max(sink_tokens, local_end_index - self.max_attention_size + sink_tokens)
-
-                tail_len_tokens = tail_end - tail_start
-                tail_len_frames = tail_len_tokens // frame_seqlen
-                sink_len_frames = sink_len_tokens // frame_seqlen
-
-                tail_start_abs_frame = current_start_frame - tail_len_frames
-                desired_sink_abs_start = tail_start_abs_frame - sink_len_frames
-
-                if self.sink_size > 0 and sink_len_tokens > 0:
-                    if "sink_base_abs_start_frame" not in kv_cache:
-                        kv_cache["sink_base_abs_start_frame"] = torch.tensor(
-                            desired_sink_abs_start, device=kv_cache["k"].device
+            if rolled_condition:
+                if self.PC.enable and available_slots < num_new_tokens:
+                    cached_len = prev_local_end
+                    key_existing = kv_cache["k"][:, :cached_len]
+                    val_existing = kv_cache["v"][:, :cached_len]
+                    if cached_len > 0:
+                        key_aug = torch.cat([key_existing, roped_key], dim=1)
+                        val_aug = torch.cat([val_existing, v], dim=1)
+                        new_abs_tile = new_abs_frames.unsqueeze(0).expand(batch_cache, -1)
+                        abs_existing = abs_frame_idx[:, :cached_len]
+                        abs_aug = torch.cat([abs_existing, new_abs_tile], dim=1)
+                        zeros_new = torch.zeros(
+                            (batch_cache, num_new_tokens),
+                            dtype=topc_select_counts.dtype,
+                            device=topc_select_counts.device,
                         )
-                    delta = int(
-                        desired_sink_abs_start - kv_cache["sink_base_abs_start_frame"].item()
-                    )
-                    if delta != 0:
-                        _rope_time_delta_mul_(kv_cache["k"][:, :sink_len_tokens], freqs, delta)
-                        kv_cache["sink_base_abs_start_frame"].fill_(desired_sink_abs_start)
+                        counts_existing = topc_select_counts[:, :cached_len]
+                        counts_aug = torch.cat([counts_existing, zeros_new], dim=1)
+                    else:
+                        key_aug = roped_key
+                        val_aug = v
+                        abs_aug = new_abs_frames.unsqueeze(0).expand(batch_cache, -1)
+                        counts_aug = torch.zeros(
+                            (batch_cache, num_new_tokens),
+                            dtype=topc_select_counts.dtype,
+                            device=topc_select_counts.device,
+                        )
 
-                    key_win = torch.cat([
-                        kv_cache["k"][:, :sink_len_tokens],
-                        kv_cache["k"][:, tail_start:tail_end]
-                    ], dim=1)
-                    val_win = torch.cat([
-                        kv_cache["v"][:, :sink_len_tokens],
-                        kv_cache["v"][:, tail_start:tail_end]
-                    ], dim=1)
+                    cached_len_aug = cached_len + num_new_tokens
+                    win_q = kv_cache.get("win_q", None)
+                    recent_eff = min(win_q.shape[1], cached_len_aug) if win_q is not None else 0
+                    if recent_eff > 0 and cached_len_aug > 0:
+                        recent_q = win_q[:, -recent_eff:]
+                        k_flat = key_aug.reshape(key_aug.shape[0], cached_len_aug, -1)
+                        k_trans = k_flat.transpose(1, 2).contiguous()
+                        scale = 1.0 / (math.sqrt(self.head_dim) * self.num_heads)
+                        if self.PC.fusion == "sum":
+                            q_sum_flat = recent_q.reshape(recent_q.shape[0], recent_eff, -1).sum(dim=1, keepdim=True)
+                            fused = torch.bmm(q_sum_flat, k_trans).squeeze(1).to(torch.float32)
+                            fused.mul_(scale)
+                        else:
+                            q_flat = recent_q.reshape(recent_q.shape[0], recent_eff, -1)
+                            fused = torch.full(
+                                (q_flat.shape[0], cached_len_aug),
+                                -float("inf"),
+                                device=key_aug.device,
+                                dtype=torch.float32
+                            )
+                            step = max(1, min(256, recent_eff))
+                            for start in range(0, recent_eff, step):
+                                end = min(recent_eff, start + step)
+                                q_chunk = q_flat[:, start:end]
+                                scores_chunk = torch.matmul(q_chunk, k_trans).to(torch.float32)
+                                scores_chunk.mul_(scale)
+                                chunk_max = scores_chunk.amax(dim=1)
+                                fused = torch.maximum(fused, chunk_max)
+
+                        forced_sink = min(max(sink_tokens, sink_tokens_v), cached_len_aug) if self.PC.keep_sinks else 0
+                        fused[:, max(0, cached_len_aug - recent_eff):] = -float("inf")
+                        if forced_sink > 0:
+                            fused[:, :forced_sink] = -float("inf")
+                        total_cap = min(int(self.PC.capacity), kv_cache_size)
+                        total_cap = max(total_cap, forced_sink + recent_eff)
+                        total_cap = min(total_cap, cached_len_aug)
+                        top_c = max(0, total_cap - forced_sink - recent_eff)
+                        keep_lists, protect_lists, topc_selected = _mkv_select_indices(
+                            fused, total_tokens=cached_len_aug, recent_tokens=recent_eff,
+                            sink_tokens=forced_sink, top_c=top_c, device=key_aug.device,
+                            topc_counts=counts_aug, topc_max_reuse=self.PC.topc_max_reuse
+                        )
+                        _mkv_prune_cache(
+                            kv_cache,
+                            keep_lists,
+                            protect_lists,
+                            forced_sink,
+                            topc_selected_lists=topc_selected,
+                            topc_max_reuse=self.PC.topc_max_reuse,
+                            source_k=key_aug,
+                            source_v=val_aug,
+                            source_abs=abs_aug,
+                            source_topc_counts=counts_aug,
+                        )
+                        prev_local_end = kv_cache["local_end_index"].item()
+                        available_slots = kv_cache_size - prev_local_end
+                        new_tokens_integrated = True
+
+                if not new_tokens_integrated and available_slots < num_new_tokens:
+                    need_evict = True
+
+            if need_evict:
+                num_evicted_tokens = num_new_tokens + prev_local_end - kv_cache_size
+                num_rolled_tokens = max(0, prev_local_end - num_evicted_tokens - sink_tokens)
+                num_rolled_tokens_v = max(0, prev_local_end - num_evicted_tokens - sink_tokens_v)
+                kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = (
+                    kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                )
+                kv_cache["v"][:, sink_tokens_v:sink_tokens_v + num_rolled_tokens_v] = (
+                    kv_cache["v"][:, sink_tokens_v + num_evicted_tokens:sink_tokens_v + num_evicted_tokens + num_rolled_tokens_v].clone()
+                )
+                abs_frame_idx[:, sink_tokens:sink_tokens + num_rolled_tokens] = (
+                    abs_frame_idx[
+                        :,
+                        sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens
+                    ].clone()
+                )
+                if sink_tokens + num_rolled_tokens < prev_local_end:
+                    abs_frame_idx[:, sink_tokens + num_rolled_tokens:prev_local_end] = -1
+                local_end_index = prev_local_end + current_end - kv_cache["global_end_index"].item() - num_evicted_tokens
+                local_start_index = local_end_index - num_new_tokens
+                kv_cache["k"][:, local_start_index:local_end_index] = roped_key
+                kv_cache["v"][:, local_start_index:local_end_index] = v
+                topc_select_counts[:, sink_tokens:sink_tokens + num_rolled_tokens] = (
+                    topc_select_counts[:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                )
+                if sink_tokens + num_rolled_tokens < prev_local_end:
+                    topc_select_counts[:, sink_tokens + num_rolled_tokens:prev_local_end] = 0
+                topc_select_counts[:, local_start_index:local_end_index] = 0
+            elif not new_tokens_integrated:
+                local_end_index = prev_local_end + current_end - kv_cache["global_end_index"].item()
+                local_start_index = local_end_index - num_new_tokens
+                kv_cache["k"][:, local_start_index:local_end_index] = roped_key
+                kv_cache["v"][:, local_start_index:local_end_index] = v
+                topc_select_counts[:, local_start_index:local_end_index] = 0
+            else:
+                local_end_index = kv_cache["local_end_index"].item()
+                local_start_index = max(0, local_end_index - num_new_tokens)
+
+            if not new_tokens_integrated:
+                insert_len = local_end_index - local_start_index
+                if insert_len > 0:
+                    token_offsets = torch.arange(insert_len, device=kv_cache["k"].device)
+                    abs_frames = current_start_frame + torch.div(token_offsets, frame_seqlen, rounding_mode='floor')
+                    abs_frame_idx[:, local_start_index:local_end_index] = abs_frames
+            elif kv_cache["k"].shape[1] > local_end_index:
+                abs_frame_idx[:, local_end_index:] = -1
+
+            window_start = max(0, local_end_index - self.max_attention_size)
+            key_win = kv_cache["k"][:, window_start:local_end_index]
+            val_win = kv_cache["v"][:, window_start:local_end_index]
+            if rolled_condition:
+                sink_len_tokens = min(local_end_index, sink_tokens)
+
+                if self.PC.enable and self.PC.mid_rope_unification:
+                    recent_keep_tokens = min(
+                        self.PC.window,
+                        max(0, local_end_index - sink_len_tokens)
+                    )
+                    mid_start = sink_len_tokens
+                    recent_start = max(mid_start, local_end_index - recent_keep_tokens)
+                    mid_end = recent_start
+                    recent_end = local_end_index
+
+                    mid_len_tokens = max(0, mid_end - mid_start)
+                    recent_len_tokens = max(0, recent_end - recent_start)
+                    sink_len_frames = math.ceil(sink_len_tokens / frame_seqlen) if sink_len_tokens > 0 else 0
+                    mid_len_frames = math.ceil(mid_len_tokens / frame_seqlen) if mid_len_tokens > 0 else 0
+                    recent_len_frames = math.ceil(recent_len_tokens / frame_seqlen) if recent_len_tokens > 0 else 0
+
+                    desired_recent_abs_start = current_start_frame - recent_len_frames
+                    desired_mid_abs_start = desired_recent_abs_start - mid_len_frames
+                    desired_sink_abs_start = desired_mid_abs_start - sink_len_frames
+
+                    if self.sink_size > 0 and sink_len_tokens > 0:
+                        if "sink_base_abs_start_frame" not in kv_cache:
+                            kv_cache["sink_base_abs_start_frame"] = torch.tensor(
+                                desired_sink_abs_start, device=kv_cache["k"].device
+                            )
+                            if self.PC.bootstrap_delta:
+                                delta_sink = self.max_attention_size - (self.PC.capacity // frame_seqlen)
+                            else:
+                                delta_sink = 0
+                        else:
+                            delta_sink = int(
+                                desired_sink_abs_start - kv_cache["sink_base_abs_start_frame"].item()
+                            )
+                        if delta_sink != 0:
+                            _rope_time_delta_mul_(kv_cache["k"][:, :sink_len_tokens], freqs, delta_sink)
+                            kv_cache["sink_base_abs_start_frame"].fill_(desired_sink_abs_start)
+                        sink_offsets = torch.arange(sink_len_tokens, device=kv_cache["k"].device)
+                        sink_frames = desired_sink_abs_start + torch.div(
+                            sink_offsets, frame_seqlen, rounding_mode='floor'
+                        )
+                        kv_cache["abs_frame_idx"][:, :sink_len_tokens] = sink_frames
+
+                    if mid_len_tokens > 0:
+                        if "topc_base_abs_start_frame" not in kv_cache:
+                            kv_cache["topc_base_abs_start_frame"] = torch.tensor(
+                                desired_mid_abs_start, device=kv_cache["k"].device
+                            )
+                        delta_mid = int(
+                            desired_mid_abs_start - kv_cache["topc_base_abs_start_frame"].item()
+                        )
+                        if delta_mid != 0:
+                            _rope_time_delta_mul_(kv_cache["k"][:, mid_start:mid_end], freqs, delta_mid)
+                            kv_cache["topc_base_abs_start_frame"].fill_(desired_mid_abs_start)
+                        mid_offsets = torch.arange(mid_len_tokens, device=kv_cache["k"].device)
+                        mid_frames = desired_mid_abs_start + torch.div(
+                            mid_offsets, frame_seqlen, rounding_mode='floor'
+                        )
+                        kv_cache["abs_frame_idx"][:, mid_start:mid_end] = mid_frames
+
+                    # After PC pruning, cache layout is already [sink][mid][recent].
+                    key_win = kv_cache["k"][:, :local_end_index]
+                    val_win = kv_cache["v"][:, :local_end_index]
                 else:
-                    key_win = kv_cache["k"][:, tail_start:tail_end]
-                    val_win = kv_cache["v"][:, tail_start:tail_end]
+                    tail_end = local_end_index
+                    tail_start = max(sink_tokens, local_end_index - self.max_attention_size + sink_tokens)
+                    tail_len_tokens = tail_end - tail_start
+                    tail_len_frames = tail_len_tokens // frame_seqlen
+                    sink_len_frames = sink_len_tokens // frame_seqlen
+                    tail_start_abs_frame = current_start_frame - tail_len_frames
+                    desired_sink_abs_start = tail_start_abs_frame - sink_len_frames
+
+                    if self.sink_size > 0 and sink_len_tokens > 0:
+                        if "sink_base_abs_start_frame" not in kv_cache:
+                            kv_cache["sink_base_abs_start_frame"] = torch.tensor(
+                                desired_sink_abs_start, device=kv_cache["k"].device
+                            )
+                            if self.PC.enable and self.PC.bootstrap_delta:
+                                delta = self.max_attention_size - (self.PC.capacity // frame_seqlen)
+                            else:
+                                delta = 0
+                        else:
+                            delta = int(
+                                desired_sink_abs_start - kv_cache["sink_base_abs_start_frame"].item()
+                            )
+                        if delta != 0:
+                            _rope_time_delta_mul_(kv_cache["k"][:, :sink_len_tokens], freqs, delta)
+                            kv_cache["sink_base_abs_start_frame"].fill_(desired_sink_abs_start)
+                        sink_offsets = torch.arange(sink_len_tokens, device=kv_cache["k"].device)
+                        sink_frames = desired_sink_abs_start + torch.div(
+                            sink_offsets, frame_seqlen, rounding_mode='floor'
+                        )
+                        kv_cache["abs_frame_idx"][:, :sink_len_tokens] = sink_frames
+
+                        key_win = torch.cat([
+                            kv_cache["k"][:, :sink_len_tokens],
+                            kv_cache["k"][:, tail_start:tail_end]
+                        ], dim=1)
+                        val_win = torch.cat([
+                            kv_cache["v"][:, :sink_len_tokens],
+                            kv_cache["v"][:, tail_start:tail_end]
+                        ], dim=1)
+                    else:
+                        key_win = kv_cache["k"][:, tail_start:tail_end]
+                        val_win = kv_cache["v"][:, tail_start:tail_end]
+
+                    if self.PC.enable:
+                        top_start = sink_tokens
+                        top_end = tail_start
+                        top_len_tokens = max(0, top_end - top_start)
+                        if top_len_tokens > 0:
+                            top_len_frames = math.ceil(top_len_tokens / frame_seqlen)
+                            desired_top_abs_start = tail_start_abs_frame - top_len_frames
+                            if "topc_base_abs_start_frame" not in kv_cache:
+                                kv_cache["topc_base_abs_start_frame"] = torch.tensor(
+                                    desired_top_abs_start, device=kv_cache["k"].device
+                                )
+                            delta_top = int(
+                                desired_top_abs_start - kv_cache["topc_base_abs_start_frame"].item()
+                            )
+                            if delta_top != 0:
+                                _rope_time_delta_mul_(kv_cache["k"][:, top_start:top_end], freqs, delta_top)
+                                kv_cache["topc_base_abs_start_frame"].fill_(desired_top_abs_start)
+                            top_offsets = torch.arange(top_len_tokens, device=kv_cache["k"].device)
+                            top_frames = desired_top_abs_start + torch.div(
+                                top_offsets, frame_seqlen, rounding_mode='floor'
+                            )
+                            kv_cache["abs_frame_idx"][:, top_start:top_end] = top_frames
 
             x = attention(roped_query, key_win, val_win)
             kv_cache["global_end_index"].fill_(current_end)
@@ -318,7 +730,8 @@ class CausalWanAttentionBlockDeepForcing(nn.Module):
                  sink_size=0,
                  qk_norm=True,
                  cross_attn_norm=False,
-                 eps=1e-6):
+                 eps=1e-6,
+                 PC: PCConfig | None = None):
         super().__init__()
         self.dim = dim
         self.ffn_dim = ffn_dim
@@ -330,7 +743,9 @@ class CausalWanAttentionBlockDeepForcing(nn.Module):
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = CausalWanSelfAttentionDeepForcing(dim, num_heads, local_attn_size, sink_size, qk_norm, eps)
+        self.self_attn = CausalWanSelfAttentionDeepForcing(
+            dim, num_heads, local_attn_size, sink_size, qk_norm, eps, PC=PC
+        )
         self.norm3 = WanLayerNorm(
             dim, eps,
             elementwise_affine=True) if cross_attn_norm else nn.Identity()
@@ -461,7 +876,15 @@ class CausalWanModelDeepForcing(ModelMixin, ConfigMixin):
                  sink_size=0,
                  qk_norm=True,
                  cross_attn_norm=True,
-                 eps=1e-6):
+                 eps=1e-6,
+                 PC_enable: bool = False,
+                 PC_capacity: int = 1560 * 16,
+                 PC_window: int = 1560 * 4,
+                 PC_fusion: str = "sum",
+                 PC_keep_sinks: bool = True,
+                 PC_topc_max_reuse: int = 7,
+                 PC_mid_rope_unification: bool = False,
+                 PC_bootstrap_delta: bool = False):
         r"""
         Initialize the diffusion model backbone.
 
@@ -531,12 +954,23 @@ class CausalWanModelDeepForcing(ModelMixin, ConfigMixin):
             nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
         self.time_projection = nn.Sequential(
             nn.SiLU(), nn.Linear(dim, dim * 6))
+        self.PC_cfg = PCConfig(
+            enable=PC_enable,
+            capacity=PC_capacity,
+            window=PC_window,
+            fusion=PC_fusion,
+            keep_sinks=PC_keep_sinks,
+            topc_max_reuse=PC_topc_max_reuse,
+            mid_rope_unification=PC_mid_rope_unification,
+            bootstrap_delta=PC_bootstrap_delta,
+        )
 
         # blocks
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
             CausalWanAttentionBlockDeepForcing(cross_attn_type, dim, ffn_dim, num_heads,
-                                               local_attn_size, sink_size, qk_norm, cross_attn_norm, eps)
+                                               local_attn_size, sink_size, qk_norm, cross_attn_norm, eps,
+                                               PC=self.PC_cfg)
             for _ in range(num_layers)
         ])
 

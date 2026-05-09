@@ -34,6 +34,11 @@ parser.add_argument("--seed", type=int, default=0, help="Random seed")
 parser.add_argument("--i2v", action="store_true", help="Whether to perform I2V (or T2V by default)")
 parser.add_argument("--sink_size", type=int, default=None, help="Override sink size in frames")
 parser.add_argument("--local_attn_size", type=int, default=None, help="Override local attention window in frames")
+parser.add_argument("--pc_enable", action="store_true", help="Enable DeepForcing sink+mid / participative compression")
+parser.add_argument("--budget", type=int, default=None, help="Override total retained budget in latent frames")
+parser.add_argument("--recent", type=int, default=None, help="Override recent window in latent frames")
+parser.add_argument("--pc_mid_rope_unification", action="store_true", help="Enable experimental mid/top-c temporal RoPE unification")
+parser.add_argument("--pc_bootstrap_delta", action="store_true", help="Enable the original DeepForcing first-PC sink bootstrap delta")
 args = parser.parse_args()
 
 # Initialize distributed inference
@@ -69,6 +74,16 @@ if args.sink_size is not None:
     config.model_kwargs["sink_size"] = int(args.sink_size)
 if args.local_attn_size is not None:
     config.model_kwargs["local_attn_size"] = int(args.local_attn_size)
+if args.pc_enable:
+    config.model_kwargs["pc_enable"] = True
+if args.budget is not None:
+    config.model_kwargs["budget"] = int(args.budget)
+if args.recent is not None:
+    config.model_kwargs["recent"] = int(args.recent)
+if args.pc_mid_rope_unification:
+    config.model_kwargs["pc_mid_rope_unification"] = True
+if args.pc_bootstrap_delta:
+    config.model_kwargs["pc_bootstrap_delta"] = True
 
 generator = WanDiffusionWrapperDeepForcing(
     **dict(config.model_kwargs),
