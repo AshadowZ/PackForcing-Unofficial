@@ -73,6 +73,7 @@ class FullResKVBlock:
     k: torch.Tensor  # [B, N, H, D]
     v: torch.Tensor  # [B, N, H, D]
     meta: BlockMeta
+    precomputed_mid: CompressedKVBlock | None = None
 
 
 @dataclass
@@ -80,6 +81,24 @@ class CompressedKVBlock:
     k: torch.Tensor  # [B, Nc, H, D]
     v: torch.Tensor  # [B, Nc, H, D]
     meta: BlockMeta
+
+
+@dataclass
+class SourceLatentBlock:
+    latent: torch.Tensor  # [B, C, T, H, W]
+    meta: BlockMeta
+
+
+@dataclass
+class PackSourceCacheState:
+    """Shared latent-space history used for train-time mid recomputation."""
+
+    recent_blocks: deque[SourceLatentBlock] = field(default_factory=deque)
+    mid_blocks: deque[SourceLatentBlock] = field(default_factory=deque)
+    next_block_id: int = 0
+    total_committed_blocks: int = 0
+    batch_size: int | None = None
+    last_block_start_frame: int | None = None
 
 
 @dataclass
@@ -177,6 +196,8 @@ def commit_fullres_block(
     v: torch.Tensor,
     start_frame: int,
     compressor: PackBlockCompressor,
+    precomputed_mid: CompressedKVBlock | None = None,
+    source_latent: torch.Tensor | None = None,
 ) -> None:
     """Commit a generated block into sink/recent/mid history."""
 
@@ -188,6 +209,10 @@ def commit_fullres_block(
         v=v,
         start_frame=start_frame,
     )
+    if precomputed_mid is not None:
+        precomputed_mid = _normalize_precomputed_mid_block(block, precomputed_mid)
+        block = FullResKVBlock(k=block.k, v=block.v, meta=block.meta, precomputed_mid=precomputed_mid)
+    _maybe_upsert_source_block(state, block.meta, source_latent)
 
     if len(state.sink_blocks) < state.cfg.sink_blocks:
         state.sink_blocks.append(block)
@@ -195,7 +220,15 @@ def commit_fullres_block(
         state.recent_blocks.append(block)
         while len(state.recent_blocks) > state.cfg.recent_blocks:
             oldest_recent = state.recent_blocks.popleft()
-            compressed = compressor(oldest_recent)
+            if oldest_recent.precomputed_mid is not None:
+                compressed = oldest_recent.precomputed_mid
+            else:
+                if state.cfg.compress_mode == "hr_spatial":
+                    raise RuntimeError(
+                        "PackForcing hr_spatial compression expected a precomputed mid block, "
+                        "but the recent block did not carry one."
+                    )
+                compressed = compressor(oldest_recent)
             _validate_compressed_block(oldest_recent, compressed)
             state.mid_blocks.append(compressed)
             _evict_mid_blocks_if_needed(state)
@@ -389,6 +422,47 @@ def _build_fullres_block(
     )
     state.next_block_id += 1
     return FullResKVBlock(k=k, v=v, meta=meta)
+
+
+def _normalize_precomputed_mid_block(
+    source_block: FullResKVBlock,
+    precomputed_mid: CompressedKVBlock,
+) -> CompressedKVBlock:
+    _validate_kv_tensor_pair(precomputed_mid.k, precomputed_mid.v)
+    if precomputed_mid.k.shape[0] != source_block.k.shape[0]:
+        raise ValueError("Precomputed mid block batch size must match its source full-res block.")
+    if precomputed_mid.meta.num_frames != source_block.meta.num_frames:
+        raise ValueError("Precomputed mid block must preserve source num_frames.")
+    if precomputed_mid.meta.packed_frame_span != source_block.meta.packed_frame_span:
+        raise ValueError("Precomputed mid block must preserve source packed_frame_span.")
+    if precomputed_mid.k.shape[1] % source_block.meta.num_frames != 0:
+        raise ValueError(
+            "Precomputed mid block token count must be divisible by source num_frames."
+        )
+
+    normalized_meta = BlockMeta(
+        block_id=source_block.meta.block_id,
+        start_frame=source_block.meta.start_frame,
+        num_frames=source_block.meta.num_frames,
+        packed_frame_span=source_block.meta.packed_frame_span,
+        tokens_per_frame=precomputed_mid.k.shape[1] // source_block.meta.num_frames,
+        num_tokens=precomputed_mid.k.shape[1],
+        is_compressed=True,
+        source_block_id=source_block.meta.block_id,
+    )
+    return CompressedKVBlock(
+        k=precomputed_mid.k,
+        v=precomputed_mid.v,
+        meta=normalized_meta,
+    )
+
+
+def _maybe_upsert_source_block(
+    state: PackLayerCacheState,
+    block_meta: BlockMeta,
+    source_latent: torch.Tensor | None,
+) -> None:
+    del state, block_meta, source_latent
 
 
 def _evict_mid_blocks_if_needed(state: PackLayerCacheState) -> None:

@@ -17,6 +17,7 @@ class Trainer:
     def __init__(self, config):
         self.config = config
         self.step = 0
+        self.disable_generator_fsdp_wrap = getattr(config, "disable_generator_fsdp_wrap", False)
 
         # Step 1: Initialize the distributed training environment (rank, seed, dtype, logging etc.)
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -62,13 +63,19 @@ class Trainer:
         # Save pretrained model state_dicts to CPU
         self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
 
-        self.model.generator = fsdp_wrap(
-            self.model.generator,
-            sharding_strategy=config.sharding_strategy,
-            mixed_precision=config.mixed_precision,
-            wrap_strategy=config.generator_fsdp_wrap_strategy,
-            cpu_offload=False
-        )
+        if self.disable_generator_fsdp_wrap:
+            self.model.generator = self.model.generator.to(
+                device=self.device,
+                dtype=self.dtype,
+            )
+        else:
+            self.model.generator = fsdp_wrap(
+                self.model.generator,
+                sharding_strategy=config.sharding_strategy,
+                mixed_precision=config.mixed_precision,
+                wrap_strategy=config.generator_fsdp_wrap_strategy,
+                cpu_offload=False,
+            )
 
         self.model.real_score = fsdp_wrap(
             self.model.real_score,
@@ -171,9 +178,37 @@ class Trainer:
                         k = k.replace("model._fsdp_wrapped_module.", "model.", 1)
                     fixed[k] = v
                 state_dict = fixed
-            self.model.generator.load_state_dict(
-                state_dict, strict=True
+            allow_missing_pack_compressor = (
+                getattr(getattr(self.model.generator, "module", self.model.generator), "model", None) is not None
+                and getattr(
+                    getattr(getattr(self.model.generator, "module", self.model.generator), "model", None),
+                    "pack_cfg",
+                    None,
+                ) is not None
+                and getattr(
+                    getattr(getattr(self.model.generator, "module", self.model.generator), "model", None).pack_cfg,
+                    "compress_mode",
+                    None,
+                )
+                == "hr_spatial"
             )
+            incompatible = self.model.generator.load_state_dict(
+                state_dict, strict=not allow_missing_pack_compressor
+            )
+            if allow_missing_pack_compressor:
+                missing = list(incompatible.missing_keys)
+                unexpected = list(incompatible.unexpected_keys)
+                disallowed_missing = [key for key in missing if "pack_compressor" not in key]
+                if disallowed_missing or unexpected:
+                    raise RuntimeError(
+                        "Unexpected generator checkpoint mismatch when loading PackForcing hr_spatial "
+                        f"weights. Missing keys: {disallowed_missing}; unexpected keys: {unexpected}"
+                    )
+                if missing:
+                    print(
+                        "Initialized new PackForcing compressor weights from scratch:",
+                        ", ".join(missing),
+                    )
 
         ##############################################################################################################
 
@@ -184,6 +219,9 @@ class Trainer:
         self.max_grad_norm_generator = getattr(config, "max_grad_norm_generator", 10.0)
         self.max_grad_norm_critic = getattr(config, "max_grad_norm_critic", 10.0)
         self.previous_time = None
+        self._packforcing_compressor_grad_sq_accum = None
+        self._packforcing_compressor_grad_hooks = []
+        self._register_packforcing_compressor_grad_hooks()
 
     def save(self):
         print("Start gathering distributed model states...")
@@ -262,6 +300,7 @@ class Trainer:
 
         # Step 3: Store gradients for the generator (if training the generator)
         if train_generator:
+            self._reset_packforcing_compressor_grad_stats()
             generator_loss, generator_log_dict = self.model.generator_loss(
                 image_or_video_shape=image_or_video_shape,
                 conditional_dict=conditional_dict,
@@ -271,11 +310,21 @@ class Trainer:
             )
            
             generator_loss.backward()
-            generator_grad_norm = self.model.generator.clip_grad_norm_(
-                self.max_grad_norm_generator)
+            packforcing_compressor_grad_norm = self._packforcing_compressor_grad_norm()
+            generator_grad_norm = self._clip_grad_norm(
+                self.model.generator,
+                self.max_grad_norm_generator,
+            )
 
             generator_log_dict.update({"generator_loss": generator_loss,
                                        "generator_grad_norm": generator_grad_norm})
+            if packforcing_compressor_grad_norm is not None:
+                generator_log_dict["packforcing_compressor_grad_norm"] = packforcing_compressor_grad_norm
+            packforcing_compressed_tokens_per_block = self._packforcing_compressed_tokens_per_block()
+            if packforcing_compressed_tokens_per_block is not None:
+                generator_log_dict["packforcing_compressed_tokens_per_block"] = (
+                    packforcing_compressed_tokens_per_block
+                )
 
             return generator_log_dict
         else:
@@ -291,8 +340,10 @@ class Trainer:
         )
 
         critic_loss.backward()
-        critic_grad_norm = self.model.fake_score.clip_grad_norm_(
-            self.max_grad_norm_critic)
+        critic_grad_norm = self._clip_grad_norm(
+            self.model.fake_score,
+            self.max_grad_norm_critic,
+        )
 
         critic_log_dict.update({"critic_loss": critic_loss,
                                 "critic_grad_norm": critic_grad_norm})
@@ -310,11 +361,18 @@ class Trainer:
             # Train the generator
             if TRAIN_GENERATOR:
                 self.generator_optimizer.zero_grad(set_to_none=True)
-                
+                packforcing_compressor_param_snapshot = self._snapshot_packforcing_compressor_params()
                 batch = next(self.dataloader)
                 generator_log_dict = self.fwdbwd_one_step(batch, True)
 
                 self.generator_optimizer.step()
+                packforcing_compressor_update_norm = self._packforcing_compressor_update_norm(
+                    packforcing_compressor_param_snapshot
+                )
+                if packforcing_compressor_update_norm is not None:
+                    generator_log_dict["packforcing_compressor_update_norm"] = (
+                        packforcing_compressor_update_norm
+                    )
                 if self.generator_ema is not None:
                     self.generator_ema.update(self.model.generator)
                 
@@ -353,6 +411,18 @@ class Trainer:
                             "dmdtrain_gradient_norm": generator_log_dict["dmdtrain_gradient_norm"].mean().item()
                         }
                     )
+                    if "packforcing_compressor_grad_norm" in generator_log_dict:
+                        wandb_loss_dict["packforcing_compressor_grad_norm"] = (
+                            generator_log_dict["packforcing_compressor_grad_norm"].mean().item()
+                        )
+                    if "packforcing_compressed_tokens_per_block" in generator_log_dict:
+                        wandb_loss_dict["packforcing_compressed_tokens_per_block"] = (
+                            generator_log_dict["packforcing_compressed_tokens_per_block"]
+                        )
+                    if "packforcing_compressor_update_norm" in generator_log_dict:
+                        wandb_loss_dict["packforcing_compressor_update_norm"] = (
+                            generator_log_dict["packforcing_compressor_update_norm"].mean().item()
+                        )
 
                 wandb_loss_dict.update(
                     {
@@ -363,6 +433,26 @@ class Trainer:
 
                 if not self.disable_wandb:
                     wandb.log(wandb_loss_dict, step=self.step)
+                if TRAIN_GENERATOR:
+                    summary = (
+                        f"[step {self.step + 1}] "
+                        f"g_loss={wandb_loss_dict['generator_loss']:.6f} "
+                        f"g_grad={wandb_loss_dict['generator_grad_norm']:.6f} "
+                        f"critic_loss={wandb_loss_dict['critic_loss']:.6f}"
+                    )
+                    if "packforcing_compressor_grad_norm" in wandb_loss_dict:
+                        summary += (
+                            f" pack_comp_grad={wandb_loss_dict['packforcing_compressor_grad_norm']:.6f}"
+                        )
+                    if "packforcing_compressed_tokens_per_block" in wandb_loss_dict:
+                        summary += (
+                            f" pack_tokens={wandb_loss_dict['packforcing_compressed_tokens_per_block']}"
+                        )
+                    if "packforcing_compressor_update_norm" in wandb_loss_dict:
+                        summary += (
+                            f" pack_comp_update={wandb_loss_dict['packforcing_compressor_update_norm']:.6f}"
+                        )
+                    print(summary)
 
             if self.step % self.config.gc_interval == 0:
                 if dist.get_rank() == 0:
@@ -383,3 +473,171 @@ class Trainer:
                 if self.is_main_process:
                     print(f"Reached max_train_steps={max_train_steps}, stopping training loop.")
                 break
+
+    def _packforcing_compressor_grad_norm(self):
+        if self._packforcing_compressor_grad_hooks:
+            squared_norm = self._packforcing_compressor_grad_sq_accum
+            if squared_norm is None:
+                squared_norm = torch.zeros((), device=self.device, dtype=torch.float32)
+            else:
+                squared_norm = squared_norm.detach().clone()
+            grad_seen = torch.tensor(
+                1 if squared_norm.item() > 0 else 0,
+                device=squared_norm.device,
+                dtype=torch.long,
+            )
+            if dist.is_initialized():
+                dist.all_reduce(squared_norm, op=dist.ReduceOp.SUM)
+                dist.all_reduce(grad_seen, op=dist.ReduceOp.SUM)
+            if grad_seen.item() > 0:
+                return squared_norm.sqrt()
+
+        try:
+            compressor = self._get_packforcing_compressor()
+            if compressor is None:
+                return None
+        except Exception:
+            return None
+
+        squared_norm = None
+        for param in compressor.parameters():
+            if param.grad is None:
+                continue
+            value = param.grad.detach().float().norm(2).pow(2)
+            squared_norm = value if squared_norm is None else squared_norm + value
+        if squared_norm is None:
+            return None
+        if dist.is_initialized():
+            dist.all_reduce(squared_norm, op=dist.ReduceOp.SUM)
+        return squared_norm.sqrt().to(self.device)
+
+    def _unwrap_fsdp_like_module(self, module):
+        current = module
+        visited = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            if hasattr(current, "module"):
+                current = current.module
+                continue
+            if hasattr(current, "_fsdp_wrapped_module"):
+                current = current._fsdp_wrapped_module
+                continue
+            break
+        return current
+
+    def _get_generator_core_model(self):
+        generator = self._unwrap_fsdp_like_module(self.model.generator)
+        if generator is None or not hasattr(generator, "model"):
+            return None
+        return self._unwrap_fsdp_like_module(generator.model)
+
+    def _get_packforcing_compressor(self):
+        model = self._get_generator_core_model()
+        if model is None:
+            return None
+        return getattr(model, "pack_compressor", None)
+
+    def _clip_grad_norm(self, module, max_norm: float):
+        if hasattr(module, "clip_grad_norm_"):
+            return module.clip_grad_norm_(max_norm)
+        params = [param for param in module.parameters() if param.requires_grad]
+        if not params:
+            return torch.zeros((), device=self.device, dtype=torch.float32)
+        return torch.nn.utils.clip_grad_norm_(params, max_norm)
+
+    def _packforcing_compressed_tokens_per_block(self):
+        try:
+            model = self._get_generator_core_model()
+            if model is None or getattr(model.pack_cfg, "compress_mode", None) != "hr_spatial":
+                return None
+            if model.pack_compressor is None:
+                return None
+            latent_h = int(self.config.image_or_video_shape[-2])
+            latent_w = int(self.config.image_or_video_shape[-1])
+            target_h = latent_h // 8
+            target_w = latent_w // 8
+            return int(self.config.num_frame_per_block * target_h * target_w)
+        except Exception:
+            return None
+
+    def _register_packforcing_compressor_grad_hooks(self):
+        if self._packforcing_compressor_grad_hooks:
+            return
+
+        try:
+            compressor = self._get_packforcing_compressor()
+            if compressor is None:
+                return
+        except Exception:
+            return
+
+        for param in compressor.parameters():
+            if not param.requires_grad:
+                continue
+
+            def _make_hook():
+                def _hook(grad):
+                    if grad is None:
+                        return grad
+                    grad_sq = grad.detach().float().pow(2).sum()
+                    if (
+                        self._packforcing_compressor_grad_sq_accum is None
+                        or self._packforcing_compressor_grad_sq_accum.device != grad_sq.device
+                    ):
+                        self._packforcing_compressor_grad_sq_accum = torch.zeros(
+                            (), device=grad_sq.device, dtype=torch.float32
+                        )
+                    self._packforcing_compressor_grad_sq_accum.add_(grad_sq)
+                    return grad
+
+                return _hook
+
+            self._packforcing_compressor_grad_hooks.append(param.register_hook(_make_hook()))
+
+    def _reset_packforcing_compressor_grad_stats(self):
+        if self._packforcing_compressor_grad_hooks:
+            self._packforcing_compressor_grad_sq_accum = torch.zeros(
+                (), device=self.device, dtype=torch.float32
+            )
+
+    def _snapshot_packforcing_compressor_params(self):
+        try:
+            compressor = self._get_packforcing_compressor()
+            if compressor is None:
+                return None
+        except Exception:
+            return None
+
+        snapshot = []
+        for param in compressor.parameters():
+            if not param.requires_grad:
+                continue
+            snapshot.append(param.detach().float().clone())
+        return snapshot if snapshot else None
+
+    def _packforcing_compressor_update_norm(self, snapshot):
+        if snapshot is None:
+            return None
+        try:
+            compressor = self._get_packforcing_compressor()
+            if compressor is None:
+                return None
+        except Exception:
+            return None
+
+        squared_norm = torch.zeros((), device=self.device, dtype=torch.float32)
+        snapshot_index = 0
+        for param in compressor.parameters():
+            if not param.requires_grad:
+                continue
+            if snapshot_index >= len(snapshot):
+                break
+            before = snapshot[snapshot_index].to(device=param.device, dtype=torch.float32)
+            after = param.detach().float()
+            squared_norm.add_((after - before).pow(2).sum())
+            snapshot_index += 1
+        if snapshot_index == 0:
+            return None
+        if dist.is_initialized():
+            dist.all_reduce(squared_norm, op=dist.ReduceOp.SUM)
+        return squared_norm.sqrt()

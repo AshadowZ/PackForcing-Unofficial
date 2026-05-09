@@ -193,24 +193,27 @@ class SelfForcingTrainingPipeline:
             # Step 3.2: record the model's output
             output[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
 
-            # Step 3.3: rerun with timestep zero to update the cache
-            context_timestep = torch.ones_like(timestep) * self.context_noise
-            # add context noise
-            denoised_pred = self.scheduler.add_noise(
-                denoised_pred.flatten(0, 1),
-                torch.randn_like(denoised_pred.flatten(0, 1)),
-                context_timestep * torch.ones(
-                    [batch_size * current_num_frames], device=noise.device, dtype=torch.long)
-            ).unflatten(0, denoised_pred.shape[:2])
-            with torch.no_grad():
-                self.generator(
-                    noisy_image_or_video=denoised_pred,
-                    conditional_dict=conditional_dict,
-                    timestep=context_timestep,
-                    kv_cache=self.kv_cache1,
-                    crossattn_cache=self.crossattn_cache,
-                    current_start=current_start_frame * self.frame_seq_length
-                )
+            # Step 3.3: rerun with context noise to update the cache only if
+            # future temporal blocks will consume it. For the last block, avoid
+            # issuing another forward before backward on the same FSDP module.
+            is_last_temporal_block = block_index == len(all_num_frames) - 1
+            if not is_last_temporal_block:
+                context_timestep = torch.ones_like(timestep) * self.context_noise
+                denoised_pred = self.scheduler.add_noise(
+                    denoised_pred.flatten(0, 1),
+                    torch.randn_like(denoised_pred.flatten(0, 1)),
+                    context_timestep * torch.ones(
+                        [batch_size * current_num_frames], device=noise.device, dtype=torch.long)
+                ).unflatten(0, denoised_pred.shape[:2])
+                with torch.no_grad():
+                    self.generator(
+                        noisy_image_or_video=denoised_pred,
+                        conditional_dict=conditional_dict,
+                        timestep=context_timestep,
+                        kv_cache=self.kv_cache1,
+                        crossattn_cache=self.crossattn_cache,
+                        current_start=current_start_frame * self.frame_seq_length
+                    )
 
             # Step 3.4: update the start and end frame indices
             current_start_frame += current_num_frames

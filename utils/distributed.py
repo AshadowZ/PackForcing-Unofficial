@@ -20,7 +20,14 @@ def fsdp_state_dict(model):
     return checkpoint
 
 
-def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_strategy="size", min_num_params=int(5e7), transformer_module=None, cpu_offload=False):
+def fsdp_wrap(
+    module,
+    sharding_strategy="full",
+    mixed_precision=False,
+    wrap_strategy="size",
+    transformer_module=None,
+    cpu_offload=False,
+):
     if mixed_precision:
         mixed_precision_policy = MixedPrecision(
             param_dtype=torch.bfloat16,
@@ -39,7 +46,7 @@ def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_stra
     elif wrap_strategy == "size":
         auto_wrap_policy = partial(
             size_based_auto_wrap_policy,
-            min_num_params=min_num_params
+            min_num_params=int(5e7)
         )
     else:
         raise ValueError(f"Invalid wrap strategy: {wrap_strategy}")

@@ -17,12 +17,13 @@ timestep_shift: 5.0
 guidance_scale: 3.0
 denoising_loss_type: flow
 mixed_precision: true
-seed: 0
+seed: 1234
 wandb_host: https://api.wandb.ai
 wandb_key: {your key}
 wandb_entity: {your entity}
 wandb_project: {your project}
 sharding_strategy: no_shard
+disable_generator_fsdp_wrap: true
 text_encoder_cpu_offload: true
 lr: 2.0e-06
 lr_critic: 4.0e-07
@@ -31,7 +32,7 @@ beta2: 0.999
 beta1_critic: 0.0
 beta2_critic: 0.999
 batch_size: 1
-ema_weight: 0.99
+ema_weight: 0.0
 ema_start_step: 100000
 total_batch_size: 1
 log_iters: 1
@@ -58,6 +59,7 @@ model_kwargs:
   pack_mid_bank_capacity_blocks: 16
   pack_mid_select_topk_blocks: 16
   pack_mid_selection_mode: recency
-  pack_compress_mode: identity
+  pack_compress_mode: hr_spatial
+  pack_compressor_detach_inputs: true
   pack_enable_rope_adjustment: true
-data_path: /beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial-legacy/prompts/vidprom_filtered_extended.txt
+data_path: /beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/prompts/packforcing_smoke_1prompt.txt

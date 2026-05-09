@@ -563,6 +563,7 @@ class WanDiffusionWrapperPackForcing(WanDiffusionWrapper):
             pack_mid_selection_mode="recency",
             pack_compress_mode="token_avg_pool",
             pack_compressed_tokens_per_block=1560,
+            pack_compressor_detach_inputs=True,
             pack_evict_mode="fifo",
             pack_reuse_mid_selection_within_block=True,
             pack_enable_rope_adjustment=False,
@@ -570,6 +571,14 @@ class WanDiffusionWrapperPackForcing(WanDiffusionWrapper):
         nn.Module.__init__(self)
 
         if is_causal:
+            from_pretrained_kwargs = {}
+            if pack_compress_mode == "hr_spatial":
+                from_pretrained_kwargs.update(
+                    {
+                        "low_cpu_mem_usage": False,
+                        "device_map": None,
+                    }
+                )
             self.model = CausalWanModelPackForcing.from_pretrained(
                 wan_model_path(model_name),
                 local_attn_size=local_attn_size,
@@ -582,9 +591,11 @@ class WanDiffusionWrapperPackForcing(WanDiffusionWrapper):
                 pack_mid_selection_mode=pack_mid_selection_mode,
                 pack_compress_mode=pack_compress_mode,
                 pack_compressed_tokens_per_block=pack_compressed_tokens_per_block,
+                pack_compressor_detach_inputs=pack_compressor_detach_inputs,
                 pack_evict_mode=pack_evict_mode,
                 pack_reuse_mid_selection_within_block=pack_reuse_mid_selection_within_block,
                 pack_enable_rope_adjustment=pack_enable_rope_adjustment,
+                **from_pretrained_kwargs,
             )
         else:
             self.model = WanModel.from_pretrained(wan_model_path(model_name))
@@ -600,14 +611,111 @@ class WanDiffusionWrapperPackForcing(WanDiffusionWrapper):
         self.seq_len = 32760
         self.post_init()
 
+    def _unwrap_fsdp_like_module(self, module):
+        current = module
+        visited = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            if hasattr(current, "module"):
+                current = current.module
+                continue
+            if hasattr(current, "_fsdp_wrapped_module"):
+                current = current._fsdp_wrapped_module
+                continue
+            break
+        return current
+
+    def _get_pack_core_model(self):
+        return self._unwrap_fsdp_like_module(self.model)
+
+    def forward(
+        self,
+        noisy_image_or_video: torch.Tensor,
+        conditional_dict: dict,
+        timestep: torch.Tensor,
+        kv_cache: Optional[List[dict]] = None,
+        crossattn_cache: Optional[List[dict]] = None,
+        current_start: Optional[int] = None,
+        classify_mode: Optional[bool] = False,
+        concat_time_embeddings: Optional[bool] = False,
+        clean_x: Optional[torch.Tensor] = None,
+        aug_t: Optional[torch.Tensor] = None,
+        cache_start: Optional[int] = None,
+    ) -> torch.Tensor:
+        prompt_embeds = conditional_dict["prompt_embeds"]
+
+        if self.uniform_timestep:
+            input_timestep = timestep[:, 0]
+        else:
+            input_timestep = timestep
+
+        logits = None
+        if kv_cache is not None:
+            flow_pred = self.model(
+                noisy_image_or_video.permute(0, 2, 1, 3, 4),
+                t=input_timestep,
+                context=prompt_embeds,
+                seq_len=self.seq_len,
+                crossattn_cache=crossattn_cache,
+                current_start=current_start,
+                cache_start=cache_start,
+                pack_use_internal_kv_cache=True,
+            ).permute(0, 2, 1, 3, 4)
+        else:
+            if clean_x is not None:
+                flow_pred = self.model(
+                    noisy_image_or_video.permute(0, 2, 1, 3, 4),
+                    t=input_timestep,
+                    context=prompt_embeds,
+                    seq_len=self.seq_len,
+                    clean_x=clean_x.permute(0, 2, 1, 3, 4),
+                    aug_t=aug_t,
+                ).permute(0, 2, 1, 3, 4)
+            else:
+                if classify_mode:
+                    flow_pred, logits = self.model(
+                        noisy_image_or_video.permute(0, 2, 1, 3, 4),
+                        t=input_timestep,
+                        context=prompt_embeds,
+                        seq_len=self.seq_len,
+                        classify_mode=True,
+                        register_tokens=self._register_tokens,
+                        cls_pred_branch=self._cls_pred_branch,
+                        gan_ca_blocks=self._gan_ca_blocks,
+                        concat_time_embeddings=concat_time_embeddings,
+                    )
+                    flow_pred = flow_pred.permute(0, 2, 1, 3, 4)
+                else:
+                    flow_pred = self.model(
+                        noisy_image_or_video.permute(0, 2, 1, 3, 4),
+                        t=input_timestep,
+                        context=prompt_embeds,
+                        seq_len=self.seq_len,
+                    ).permute(0, 2, 1, 3, 4)
+
+        pred_x0 = self._convert_flow_pred_to_x0(
+            flow_pred=flow_pred.flatten(0, 1),
+            xt=noisy_image_or_video.flatten(0, 1),
+            timestep=timestep.flatten(0, 1)
+        ).unflatten(0, flow_pred.shape[:2])
+
+        if logits is not None:
+            return flow_pred, pred_x0, logits
+
+        return flow_pred, pred_x0
+
     def build_kv_cache(self, batch_size: int, dtype: torch.dtype, device: torch.device, num_transformer_blocks: int, frame_seq_length: int):
         del batch_size, dtype, device, num_transformer_blocks, frame_seq_length
-        return self.model.make_pack_kv_cache()
+        core_model = self._get_pack_core_model()
+        core_model.reset_pack_layer_cache()
+        core_model.reset_pack_source_cache()
+        return core_model.get_pack_layer_cache()
 
     def reset_kv_cache(self, kv_cache, device: torch.device) -> None:
-        del device
-        for layer_cache in kv_cache:
-            reset_pack_layer_cache(layer_cache)
+        del kv_cache, device
+        core_model = self._get_pack_core_model()
+        core_model.reset_pack_layer_cache()
+        core_model.reset_pack_source_cache()
 
     def uses_structured_kv_cache(self) -> bool:
         return True

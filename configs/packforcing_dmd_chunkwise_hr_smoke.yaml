@@ -58,6 +58,7 @@ model_kwargs:
   pack_mid_bank_capacity_blocks: 16
   pack_mid_select_topk_blocks: 16
   pack_mid_selection_mode: recency
-  pack_compress_mode: identity
+  pack_compress_mode: hr_spatial
+  pack_compressor_detach_inputs: true
   pack_enable_rope_adjustment: true
 data_path: /beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial-legacy/prompts/vidprom_filtered_extended.txt
