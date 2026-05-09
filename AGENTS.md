@@ -37,6 +37,12 @@ complexity.
 
 - Read `docs/deepforcing_debug.md` before changing the current DeepForcing
   sink-only / sink-mid baseline behavior.
+- Preferred runtime environment for this repository is the existing conda env
+  at `/beijing-c/workspace/hxj/miniconda3/envs/packforcing`.
+- When running local smoke tests or inference scripts, prefer invoking the
+  interpreter directly as
+  `/beijing-c/workspace/hxj/miniconda3/envs/packforcing/bin/python ...`
+  instead of creating or mutating another environment.
 
 ## Commit Format
 

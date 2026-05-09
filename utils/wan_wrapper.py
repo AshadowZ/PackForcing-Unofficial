@@ -11,6 +11,8 @@ from wan.modules.vae import _video_vae
 from wan.modules.t5 import umt5_xxl
 from wan.modules.causal_model import CausalWanModel
 from wan.modules.causal_model_deepforcing import CausalWanModelDeepForcing
+from wan.modules.causal_model_packforcing import CausalWanModelPackForcing
+from wan.modules.pack_cache import reset_pack_layer_cache
 
 
 def _find_repo_root(start: Path) -> Path:
@@ -322,6 +324,30 @@ class WanDiffusionWrapper(torch.nn.Module):
         """
         self.get_scheduler()
 
+    def build_kv_cache(self, batch_size: int, dtype: torch.dtype, device: torch.device, num_transformer_blocks: int, frame_seq_length: int):
+        kv_cache = []
+        if self.model.local_attn_size != -1:
+            kv_cache_size = self.model.local_attn_size * frame_seq_length
+        else:
+            kv_cache_size = 32760
+
+        for _ in range(num_transformer_blocks):
+            kv_cache.append({
+                "k": torch.zeros([batch_size, kv_cache_size, 12, 128], dtype=dtype, device=device),
+                "v": torch.zeros([batch_size, kv_cache_size, 12, 128], dtype=dtype, device=device),
+                "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
+            })
+        return kv_cache
+
+    def reset_kv_cache(self, kv_cache, device: torch.device) -> None:
+        for layer_cache in kv_cache:
+            layer_cache["global_end_index"] = torch.tensor([0], dtype=torch.long, device=device)
+            layer_cache["local_end_index"] = torch.tensor([0], dtype=torch.long, device=device)
+
+    def uses_structured_kv_cache(self) -> bool:
+        return False
+
 
 class WanDiffusionWrapperDeepForcing(WanDiffusionWrapper):
     def __init__(
@@ -519,6 +545,72 @@ class WanDiffusionWrapperDeepForcing(WanDiffusionWrapper):
             return flow_pred, pred_x0, logits
 
         return flow_pred, pred_x0
+
+
+class WanDiffusionWrapperPackForcing(WanDiffusionWrapper):
+    def __init__(
+            self,
+            model_name="Wan2.1-T2V-1.3B",
+            timestep_shift=8.0,
+            is_causal=False,
+            local_attn_size=-1,
+            sink_size=0,
+            pack_enable=False,
+            pack_sink_blocks=2,
+            pack_recent_blocks=1,
+            pack_mid_bank_capacity_blocks=3,
+            pack_mid_select_topk_blocks=2,
+            pack_mid_selection_mode="recency",
+            pack_compress_mode="token_avg_pool",
+            pack_compressed_tokens_per_block=1560,
+            pack_evict_mode="fifo",
+            pack_reuse_mid_selection_within_block=True,
+            pack_enable_rope_adjustment=False,
+    ):
+        nn.Module.__init__(self)
+
+        if is_causal:
+            self.model = CausalWanModelPackForcing.from_pretrained(
+                wan_model_path(model_name),
+                local_attn_size=local_attn_size,
+                sink_size=sink_size,
+                pack_enable=pack_enable,
+                pack_sink_blocks=pack_sink_blocks,
+                pack_recent_blocks=pack_recent_blocks,
+                pack_mid_bank_capacity_blocks=pack_mid_bank_capacity_blocks,
+                pack_mid_select_topk_blocks=pack_mid_select_topk_blocks,
+                pack_mid_selection_mode=pack_mid_selection_mode,
+                pack_compress_mode=pack_compress_mode,
+                pack_compressed_tokens_per_block=pack_compressed_tokens_per_block,
+                pack_evict_mode=pack_evict_mode,
+                pack_reuse_mid_selection_within_block=pack_reuse_mid_selection_within_block,
+                pack_enable_rope_adjustment=pack_enable_rope_adjustment,
+            )
+        else:
+            self.model = WanModel.from_pretrained(wan_model_path(model_name))
+        self.model.eval()
+
+        self.uniform_timestep = not is_causal
+
+        self.scheduler = FlowMatchScheduler(
+            shift=timestep_shift, sigma_min=0.0, extra_one_step=True
+        )
+        self.scheduler.set_timesteps(1000, training=True)
+
+        self.seq_len = 32760
+        self.post_init()
+
+    def build_kv_cache(self, batch_size: int, dtype: torch.dtype, device: torch.device, num_transformer_blocks: int, frame_seq_length: int):
+        del batch_size, dtype, device, num_transformer_blocks, frame_seq_length
+        return self.model.make_pack_kv_cache()
+
+    def reset_kv_cache(self, kv_cache, device: torch.device) -> None:
+        del device
+        for layer_cache in kv_cache:
+            reset_pack_layer_cache(layer_cache)
+
+    def uses_structured_kv_cache(self) -> bool:
+        return True
 
     def get_scheduler(self) -> SchedulerInterface:
         """

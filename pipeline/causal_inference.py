@@ -128,11 +128,7 @@ class CausalInferencePipeline(torch.nn.Module):
             for block_index in range(self.num_transformer_blocks):
                 self.crossattn_cache[block_index]["is_init"] = False
             # reset kv cache
-            for block_index in range(len(self.kv_cache1)):
-                self.kv_cache1[block_index]["global_end_index"] = torch.tensor(
-                    [0], dtype=torch.long, device=noise.device)
-                self.kv_cache1[block_index]["local_end_index"] = torch.tensor(
-                    [0], dtype=torch.long, device=noise.device)
+            self.generator.reset_kv_cache(self.kv_cache1, device=noise.device)
 
         # Step 2: Cache context feature
         current_start_frame = 0
@@ -287,23 +283,13 @@ class CausalInferencePipeline(torch.nn.Module):
         """
         Initialize a Per-GPU KV cache for the Wan model.
         """
-        kv_cache1 = []
-        if self.local_attn_size != -1:
-            # Use the local attention size to compute the KV cache size
-            kv_cache_size = self.local_attn_size * self.frame_seq_length
-        else:
-            # Use the default KV cache size
-            kv_cache_size = 32760
-
-        for _ in range(self.num_transformer_blocks):
-            kv_cache1.append({
-                "k": torch.zeros([batch_size, kv_cache_size, 12, 128], dtype=dtype, device=device),
-                "v": torch.zeros([batch_size, kv_cache_size, 12, 128], dtype=dtype, device=device),
-                "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                "local_end_index": torch.tensor([0], dtype=torch.long, device=device)
-            })
-
-        self.kv_cache1 = kv_cache1  # always store the clean cache
+        self.kv_cache1 = self.generator.build_kv_cache(
+            batch_size=batch_size,
+            dtype=dtype,
+            device=device,
+            num_transformer_blocks=self.num_transformer_blocks,
+            frame_seq_length=self.frame_seq_length,
+        )
 
     def _initialize_crossattn_cache(self, batch_size, dtype, device):
         """
