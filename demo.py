@@ -32,8 +32,8 @@ from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller
 parser = argparse.ArgumentParser()
 parser.add_argument('--port', type=int, default=5001)
 parser.add_argument('--host', type=str, default='0.0.0.0')
-parser.add_argument("--checkpoint_path", type=str, default='.checkpoints/framewise/causal_forcing.pt')
-parser.add_argument("--config_path", type=str, default='.configs/causal_forcing_dmd_framewise.yaml')
+parser.add_argument("--checkpoint_path", type=str, default='ckpt/causal_forcing_ckpt/causal_forcing.pt')
+parser.add_argument("--config_path", type=str, default='configs/causal_forcing_dmd_framewise.yaml')
 parser.add_argument('--trt', action='store_true')
 args = parser.parse_args()
 
@@ -100,7 +100,7 @@ def initialize_vae_decoder(use_taehv=False, use_trt=False):
         current_vae_decoder = TAEHVDiffusersWrapper()
     else:
         current_vae_decoder = VAEDecoderWrapper()
-        vae_state_dict = torch.load('wan_models/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth', map_location="cpu")
+        vae_state_dict = torch.load('ckpt/wan_models/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth', map_location="cpu")
         decoder_state_dict = {}
         for key, value in vae_state_dict.items():
             if 'decoder.' in key or 'conv2' in key:

@@ -2,6 +2,7 @@ import os
 import argparse
 import time
 from typing import Optional
+from pathlib import Path
 
 import torch
 from torchvision.io import write_video
@@ -17,6 +18,8 @@ from pipeline import CausalDiffusionInferencePipeline, CausalInferencePipeline
 # -----------------------------
 _PIPELINE: Optional[torch.nn.Module] = None
 _DEVICE: Optional[torch.device] = None
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_WAN_DIR = _REPO_ROOT / "ckpt" / "wan_models" / "Wan2.1-T2V-1.3B"
 
 
 def _ensure_gpu():
@@ -63,12 +66,11 @@ def _load_pipeline(config_path: str, checkpoint_path: Optional[str], use_ema: bo
     pipeline.eval()
 
     # Quick sanity path check for Wan models to give friendly errors
-    wan_dir = os.path.join('wan_models', 'Wan2.1-T2V-1.3B')
-    if not os.path.isdir(wan_dir):
+    if not _WAN_DIR.is_dir():
         raise gr.Error(
-            "Wan2.1-T2V-1.3B not found at 'wan_models/Wan2.1-T2V-1.3B'.\n"
+            "Wan2.1-T2V-1.3B not found at 'ckpt/wan_models/Wan2.1-T2V-1.3B'.\n"
             "Please download it first, e.g.:\n"
-            "huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir-use-symlinks False --local-dir wan_models/Wan2.1-T2V-1.3B"
+            "huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir-use-symlinks False --local-dir ckpt/wan_models/Wan2.1-T2V-1.3B"
         )
 
     _PIPELINE = pipeline
@@ -121,9 +123,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config_path', type=str, default='configs/rolling_forcing_dmd.yaml',
                         help='Path to the model config')
-    parser.add_argument('--checkpoint_path', type=str, default='checkpoints/rolling_forcing_dmd.pt',
+    parser.add_argument('--checkpoint_path', type=str, default='../ckpt/causal_forcing_ckpt/longvideo.pt',
                         help='Path to rolling forcing checkpoint (.pt). If missing, will run with base weights only if available.')
-    parser.add_argument('--output_dir', type=str, default='videos/gradio', help='Where to save generated videos')
+    parser.add_argument('--output_dir', type=str, default='../output/gradio', help='Where to save generated videos')
     parser.add_argument('--no_ema', action='store_true', help='Disable EMA weights when loading checkpoint')
     parser.add_argument('--server_name', type=str, default='0.0.0.0', help='Gradio server host')
     parser.add_argument('--server_port', type=int, default=7860, help='Gradio server port')

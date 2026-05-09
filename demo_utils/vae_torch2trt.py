@@ -41,7 +41,7 @@ inputs = [dummy_input, is_first_frame, *dummy_cache_input]
 # ─────────────────────────────────────────────────────────
 model = VAEDecoderWrapperSingle().half().cuda().eval()
 
-vae_state_dict = torch.load('wan_models/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth', map_location="cpu")
+vae_state_dict = torch.load('ckpt/wan_models/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth', map_location="cpu")
 decoder_state_dict = {}
 for key, value in vae_state_dict.items():
     if 'decoder.' in key or 'conv2' in key:

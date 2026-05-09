@@ -1,4 +1,4 @@
-generator_ckpt: checkpoints/chunkwise/causal_ode.pt
+generator_ckpt: ckpt/causal_forcing_ckpt/causal_ode.pt
 generator_fsdp_wrap_strategy: size
 real_score_fsdp_wrap_strategy: size
 fake_score_fsdp_wrap_strategy: size

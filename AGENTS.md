@@ -28,6 +28,8 @@ complexity.
 - Prefer adding small helper modules over overloading a single large file.
 - Do not silently couple unrelated experiments together.
 - Do not remove upstream code paths unless the user explicitly asks for cleanup.
+- Write all test videos and temporary validation outputs under the repository
+  root `output/` directory, not under `long_video/`.
 - Treat long-video behavior as an ablation problem.
 - Avoid large coupled changes that make failures hard to attribute.
 
