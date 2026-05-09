@@ -1,5 +1,6 @@
 import gc
 import logging
+from contextlib import ExitStack, nullcontext
 from utils.dataset import cycle
 from utils.dataset import TextDataset
 from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job
@@ -26,6 +27,19 @@ class Trainer:
         launch_distributed_job()
         global_rank = dist.get_rank()
         self.world_size = dist.get_world_size()
+        self.grad_accum = int(getattr(config, "grad_accum", 1))
+        self.grad_accum_use_no_sync = bool(getattr(config, "grad_accum_use_no_sync", True))
+        if self.grad_accum <= 0:
+            raise ValueError(f"grad_accum must be positive, got {self.grad_accum}.")
+        total_batch_size = getattr(config, "total_batch_size", None)
+        if total_batch_size is not None:
+            expected_total_batch_size = config.batch_size * self.world_size * self.grad_accum
+            if total_batch_size != expected_total_batch_size:
+                raise ValueError(
+                    "total_batch_size must equal batch_size * world_size * grad_accum, "
+                    f"got total_batch_size={total_batch_size}, batch_size={config.batch_size}, "
+                    f"world_size={self.world_size}, grad_accum={self.grad_accum}."
+                )
 
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
         self.device = torch.cuda.current_device()
@@ -264,7 +278,14 @@ class Trainer:
             print("Model saved to", os.path.join(self.output_path,
                   f"checkpoint_model_{self.step:06d}", "model.pt"))
             
-    def fwdbwd_one_step(self, batch, train_generator, clean_latent=None):
+    def fwdbwd_one_step(
+        self,
+        batch,
+        train_generator,
+        clean_latent=None,
+        backward_scale: float = 1.0,
+        compute_grad_norms: bool = True,
+    ):
         self.model.eval()  # prevent any randomness (e.g. dropout)
 
         if self.step % 20 == 0:
@@ -300,7 +321,6 @@ class Trainer:
 
         # Step 3: Store gradients for the generator (if training the generator)
         if train_generator:
-            self._reset_packforcing_compressor_grad_stats()
             generator_loss, generator_log_dict = self.model.generator_loss(
                 image_or_video_shape=image_or_video_shape,
                 conditional_dict=conditional_dict,
@@ -308,18 +328,18 @@ class Trainer:
                 clean_latent=clean_latent,
                 initial_latent=image_latent if self.config.i2v else None
             )
-           
-            generator_loss.backward()
-            packforcing_compressor_grad_norm = self._packforcing_compressor_grad_norm()
-            generator_grad_norm = self._clip_grad_norm(
-                self.model.generator,
-                self.max_grad_norm_generator,
-            )
+            (generator_loss * backward_scale).backward()
 
-            generator_log_dict.update({"generator_loss": generator_loss,
-                                       "generator_grad_norm": generator_grad_norm})
-            if packforcing_compressor_grad_norm is not None:
-                generator_log_dict["packforcing_compressor_grad_norm"] = packforcing_compressor_grad_norm
+            generator_log_dict.update({"generator_loss": generator_loss})
+            if compute_grad_norms:
+                packforcing_compressor_grad_norm = self._packforcing_compressor_grad_norm()
+                generator_grad_norm = self._clip_grad_norm(
+                    self.model.generator,
+                    self.max_grad_norm_generator,
+                )
+                generator_log_dict["generator_grad_norm"] = generator_grad_norm
+                if packforcing_compressor_grad_norm is not None:
+                    generator_log_dict["packforcing_compressor_grad_norm"] = packforcing_compressor_grad_norm
             packforcing_compressed_tokens_per_block = self._packforcing_compressed_tokens_per_block()
             if packforcing_compressed_tokens_per_block is not None:
                 generator_log_dict["packforcing_compressed_tokens_per_block"] = (
@@ -338,15 +358,15 @@ class Trainer:
             clean_latent=clean_latent,
             initial_latent=image_latent if self.config.i2v else None
         )
+        (critic_loss * backward_scale).backward()
 
-        critic_loss.backward()
-        critic_grad_norm = self._clip_grad_norm(
-            self.model.fake_score,
-            self.max_grad_norm_critic,
-        )
-
-        critic_log_dict.update({"critic_loss": critic_loss,
-                                "critic_grad_norm": critic_grad_norm})
+        critic_log_dict.update({"critic_loss": critic_loss})
+        if compute_grad_norms:
+            critic_grad_norm = self._clip_grad_norm(
+                self.model.fake_score,
+                self.max_grad_norm_critic,
+            )
+            critic_log_dict["critic_grad_norm"] = critic_grad_norm
 
         return critic_log_dict
 
@@ -361,9 +381,25 @@ class Trainer:
             # Train the generator
             if TRAIN_GENERATOR:
                 self.generator_optimizer.zero_grad(set_to_none=True)
+                self._reset_packforcing_compressor_grad_stats()
                 packforcing_compressor_param_snapshot = self._snapshot_packforcing_compressor_params()
-                batch = next(self.dataloader)
-                generator_log_dict = self.fwdbwd_one_step(batch, True)
+                generator_log_dicts = []
+                for accum_step in range(self.grad_accum):
+                    batch = next(self.dataloader)
+                    sync_gradients = accum_step == self.grad_accum - 1
+                    with self._no_sync_context(
+                        [self.model.generator],
+                        enabled=self.grad_accum_use_no_sync and not sync_gradients,
+                    ):
+                        generator_log_dicts.append(
+                            self.fwdbwd_one_step(
+                                batch,
+                                True,
+                                backward_scale=1.0 / self.grad_accum,
+                                compute_grad_norms=sync_gradients,
+                            )
+                        )
+                generator_log_dict = self._average_log_dicts(generator_log_dicts)
 
                 self.generator_optimizer.step()
                 packforcing_compressor_update_norm = self._packforcing_compressor_update_norm(
@@ -375,15 +411,26 @@ class Trainer:
                     )
                 if self.generator_ema is not None:
                     self.generator_ema.update(self.model.generator)
-                
-                
-                
 
             # Train the critic
             self.critic_optimizer.zero_grad(set_to_none=True)
-            batch = next(self.dataloader)
-            critic_log_dict = self.fwdbwd_one_step(batch, False)
-                
+            critic_log_dicts = []
+            for accum_step in range(self.grad_accum):
+                batch = next(self.dataloader)
+                sync_gradients = accum_step == self.grad_accum - 1
+                with self._no_sync_context(
+                    [self.model.fake_score],
+                    enabled=self.grad_accum_use_no_sync and not sync_gradients,
+                ):
+                    critic_log_dicts.append(
+                        self.fwdbwd_one_step(
+                            batch,
+                            False,
+                            backward_scale=1.0 / self.grad_accum,
+                            compute_grad_norms=sync_gradients,
+                        )
+                    )
+            critic_log_dict = self._average_log_dicts(critic_log_dicts)
             self.critic_optimizer.step()
 
             # Increment the step since we finished gradient update
@@ -476,21 +523,21 @@ class Trainer:
 
     def _packforcing_compressor_grad_norm(self):
         if self._packforcing_compressor_grad_hooks:
-            squared_norm = self._packforcing_compressor_grad_sq_accum
-            if squared_norm is None:
-                squared_norm = torch.zeros((), device=self.device, dtype=torch.float32)
+            hook_squared_norm = self._packforcing_compressor_grad_sq_accum
+            if hook_squared_norm is None:
+                hook_squared_norm = torch.zeros((), device=self.device, dtype=torch.float32)
             else:
-                squared_norm = squared_norm.detach().clone()
-            grad_seen = torch.tensor(
-                1 if squared_norm.item() > 0 else 0,
-                device=squared_norm.device,
+                hook_squared_norm = hook_squared_norm.detach().clone()
+            hook_grad_seen = torch.tensor(
+                1 if hook_squared_norm.item() > 0 else 0,
+                device=hook_squared_norm.device,
                 dtype=torch.long,
             )
             if dist.is_initialized():
-                dist.all_reduce(squared_norm, op=dist.ReduceOp.SUM)
-                dist.all_reduce(grad_seen, op=dist.ReduceOp.SUM)
-            if grad_seen.item() > 0:
-                return squared_norm.sqrt()
+                dist.all_reduce(hook_squared_norm, op=dist.ReduceOp.SUM)
+                dist.all_reduce(hook_grad_seen, op=dist.ReduceOp.SUM)
+            if hook_grad_seen.item() > 0:
+                return hook_squared_norm.sqrt()
 
         try:
             compressor = self._get_packforcing_compressor()
@@ -499,17 +546,49 @@ class Trainer:
         except Exception:
             return None
 
-        squared_norm = None
+        squared_norm = torch.zeros((), device=self.device, dtype=torch.float32)
+        grad_seen = torch.zeros((), device=self.device, dtype=torch.long)
         for param in compressor.parameters():
             if param.grad is None:
                 continue
             value = param.grad.detach().float().norm(2).pow(2)
-            squared_norm = value if squared_norm is None else squared_norm + value
-        if squared_norm is None:
-            return None
+            squared_norm = squared_norm + value
+            grad_seen.fill_(1)
         if dist.is_initialized():
             dist.all_reduce(squared_norm, op=dist.ReduceOp.SUM)
+            dist.all_reduce(grad_seen, op=dist.ReduceOp.SUM)
+        if grad_seen.item() == 0:
+            return None
         return squared_norm.sqrt().to(self.device)
+
+    def _no_sync_context(self, modules, enabled: bool):
+        if not enabled:
+            return nullcontext()
+
+        stack = ExitStack()
+        for module in modules:
+            if hasattr(module, "no_sync"):
+                stack.enter_context(module.no_sync())
+        return stack
+
+    def _average_log_dicts(self, log_dicts):
+        if not log_dicts:
+            return {}
+
+        averaged = {}
+        all_keys = set().union(*(log_dict.keys() for log_dict in log_dicts))
+        for key in all_keys:
+            values = [log_dict[key] for log_dict in log_dicts if key in log_dict]
+            if not values:
+                continue
+            first = values[0]
+            if torch.is_tensor(first):
+                averaged[key] = torch.stack([value.detach() for value in values]).mean(dim=0)
+            elif isinstance(first, (int, float)):
+                averaged[key] = sum(values) / len(values)
+            else:
+                averaged[key] = first
+        return averaged
 
     def _unwrap_fsdp_like_module(self, module):
         current = module

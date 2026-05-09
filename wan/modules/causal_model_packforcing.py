@@ -121,6 +121,8 @@ class CausalWanSelfAttentionPackForcing(CausalWanSelfAttention):
         pack_compressed_hidden=None,
         pack_compressed_grid_sizes=None,
         pack_history_mid_latents=None,
+        pack_history_mid_hidden=None,
+        pack_history_mid_grid_sizes=None,
         pack_source_latent=None,
     ):
         if kv_cache is None or not self.pack_cfg.enable:
@@ -244,11 +246,12 @@ class CausalWanSelfAttentionPackForcing(CausalWanSelfAttention):
         if (
             not allow_cache_mutation
             and self.pack_cfg.compress_mode == "hr_spatial"
-            and pack_history_mid_latents is not None
+            and pack_history_mid_hidden is not None
         ):
-            trainable_mid_blocks = self._build_history_mid_blocks_from_latents(
+            trainable_mid_blocks = self._build_history_mid_blocks_from_hidden(
                 history_state=history_state,
-                source_latents=pack_history_mid_latents,
+                compressed_hidden=pack_history_mid_hidden,
+                compressed_grid_sizes=pack_history_mid_grid_sizes,
                 freqs=freqs,
             )
             history_view_state = _state_with_mid_blocks(history_state, trainable_mid_blocks)
@@ -378,42 +381,30 @@ class CausalWanSelfAttentionPackForcing(CausalWanSelfAttention):
             meta=meta,
         )
 
-    def _build_history_mid_blocks_from_latents(
+    def _build_history_mid_blocks_from_hidden(
         self,
         history_state: PackLayerCacheState,
-        source_latents: torch.Tensor,
+        compressed_hidden: torch.Tensor,
+        compressed_grid_sizes: torch.Tensor,
         freqs: torch.Tensor,
     ) -> list[CompressedKVBlock]:
         cached_mid_blocks = get_mid_candidate_blocks(history_state)
-        if self._pack_history_latent_compressor is None:
-            raise RuntimeError(
-                "PackForcing hr_spatial training expected a history latent compressor callable."
-            )
-        if source_latents.ndim != 6:
+        if compressed_hidden.ndim != 4:
             raise ValueError(
-                "pack_history_mid_latents must have shape [M, B, C, T, H, W]."
+                "pack_history_mid_hidden must have shape [M, B, N, D]."
             )
-        if source_latents.shape[0] != len(cached_mid_blocks):
+        if compressed_grid_sizes.ndim != 3 or compressed_grid_sizes.shape[-1] != 3:
             raise ValueError(
-                "pack_history_mid_latents count must match the number of cached mid blocks."
+                "pack_history_mid_grid_sizes must have shape [M, B, 3]."
             )
-
-        num_mid_blocks, batch_size, channels, num_frames, height, width = source_latents.shape
-        flat_latents = source_latents.reshape(
-            num_mid_blocks * batch_size,
-            channels,
-            num_frames,
-            height,
-            width,
-        )
-        compressed_hidden, compressed_grid_sizes = self._pack_history_latent_compressor(flat_latents)
-        compressed_hidden = compressed_hidden.reshape(
-            num_mid_blocks,
-            batch_size,
-            compressed_hidden.shape[1],
-            compressed_hidden.shape[2],
-        )
-        compressed_grid_sizes = compressed_grid_sizes.reshape(num_mid_blocks, batch_size, 3)
+        if compressed_hidden.shape[0] != len(cached_mid_blocks):
+            raise ValueError(
+                "pack_history_mid_hidden count must match the number of cached mid blocks."
+            )
+        if compressed_grid_sizes.shape[:2] != compressed_hidden.shape[:2]:
+            raise ValueError(
+                "pack_history_mid_grid_sizes must align with pack_history_mid_hidden on [M, B]."
+            )
 
         trainable_mid_blocks: list[CompressedKVBlock] = []
         for block_idx, cached_mid in enumerate(cached_mid_blocks):
@@ -517,6 +508,8 @@ class CausalWanAttentionBlockPackForcing(nn.Module):
         pack_compressed_hidden=None,
         pack_compressed_grid_sizes=None,
         pack_history_mid_latents=None,
+        pack_history_mid_hidden=None,
+        pack_history_mid_grid_sizes=None,
         pack_source_latent=None,
     ):
         num_frames, frame_seqlen = e.shape[1], x.shape[1] // e.shape[1]
@@ -534,6 +527,8 @@ class CausalWanAttentionBlockPackForcing(nn.Module):
             pack_compressed_hidden,
             pack_compressed_grid_sizes,
             pack_history_mid_latents,
+            pack_history_mid_hidden,
+            pack_history_mid_grid_sizes,
             pack_source_latent,
         )
         x = x + (y.unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * e[2]).flatten(1, 2)
@@ -648,9 +643,6 @@ class CausalWanModelPackForcing(CausalWanModel):
             )
             for _ in range(num_layers)
         ])
-        if self.pack_compressor is not None:
-            for block in self.blocks:
-                block.self_attn._pack_history_latent_compressor = self.pack_compressor.compress_latent
         self.init_weights()
 
     def make_pack_kv_cache(self) -> list[PackLayerCacheState]:
@@ -692,6 +684,37 @@ class CausalWanModelPackForcing(CausalWanModel):
                 "PackForcing train-time history mid latents must share the same shape."
             )
         return torch.stack(latents, dim=0)
+
+    def _compress_history_mid_latents(
+        self,
+        source_latents: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if source_latents is None:
+            return None, None
+        if self.pack_compressor is None:
+            raise RuntimeError("PackForcing hr_spatial training expected pack_compressor.")
+        if source_latents.ndim != 6:
+            raise ValueError(
+                "PackForcing history mid latents must have shape [M, B, C, T, H, W]."
+            )
+
+        num_mid_blocks, batch_size, channels, num_frames, height, width = source_latents.shape
+        flat_latents = source_latents.reshape(
+            num_mid_blocks * batch_size,
+            channels,
+            num_frames,
+            height,
+            width,
+        )
+        compressed_hidden, compressed_grid_sizes = self.pack_compressor.compress_latent(flat_latents)
+        compressed_hidden = compressed_hidden.reshape(
+            num_mid_blocks,
+            batch_size,
+            compressed_hidden.shape[1],
+            compressed_hidden.shape[2],
+        )
+        compressed_grid_sizes = compressed_grid_sizes.reshape(num_mid_blocks, batch_size, 3)
+        return compressed_hidden, compressed_grid_sizes
 
     def _commit_source_latent_block(
         self,
@@ -773,6 +796,8 @@ class CausalWanModelPackForcing(CausalWanModel):
         pack_compressed_hidden = None
         pack_compressed_grid_sizes = None
         pack_history_mid_latents = None
+        pack_history_mid_hidden = None
+        pack_history_mid_grid_sizes = None
         if (
             kv_cache is not None
             and self.pack_compressor is not None
@@ -781,6 +806,9 @@ class CausalWanModelPackForcing(CausalWanModel):
         ):
             if torch.is_grad_enabled():
                 pack_history_mid_latents = self._gather_history_mid_latents()
+                pack_history_mid_hidden, pack_history_mid_grid_sizes = self._compress_history_mid_latents(
+                    pack_history_mid_latents
+                )
             else:
                 pack_compressed_hidden, pack_compressed_grid_sizes = self.pack_compressor.compress_latent(
                     raw_latent_batch
@@ -823,6 +851,8 @@ class CausalWanModelPackForcing(CausalWanModel):
             pack_compressed_hidden=pack_compressed_hidden,
             pack_compressed_grid_sizes=pack_compressed_grid_sizes,
             pack_history_mid_latents=pack_history_mid_latents,
+            pack_history_mid_hidden=pack_history_mid_hidden,
+            pack_history_mid_grid_sizes=pack_history_mid_grid_sizes,
             pack_source_latent=raw_latent_batch,
         )
 
@@ -832,22 +862,34 @@ class CausalWanModelPackForcing(CausalWanModel):
                 compressed_hidden_inp,
                 compressed_grid_sizes_inp,
                 history_mid_latents_inp,
+                history_mid_hidden_inp,
+                history_mid_grid_sizes_inp,
                 *inputs,
                 **inner_kwargs,
             ):
-                return module(
+                call_kwargs = dict(inner_kwargs)
+                call_kwargs.pop("pack_compressed_hidden", None)
+                call_kwargs.pop("pack_compressed_grid_sizes", None)
+                call_kwargs.pop("pack_history_mid_latents", None)
+                call_kwargs.pop("pack_history_mid_hidden", None)
+                call_kwargs.pop("pack_history_mid_grid_sizes", None)
+                x_out = module(
                     x_inp,
                     *inputs,
                     pack_compressed_hidden=compressed_hidden_inp,
                     pack_compressed_grid_sizes=compressed_grid_sizes_inp,
                     pack_history_mid_latents=history_mid_latents_inp,
-                    **inner_kwargs,
+                    pack_history_mid_hidden=history_mid_hidden_inp,
+                    pack_history_mid_grid_sizes=history_mid_grid_sizes_inp,
+                    **call_kwargs,
                 )
+                return x_out
             return custom_forward
 
         for block_index, block in enumerate(self.blocks):
             use_block_checkpoint = torch.is_grad_enabled() and self.gradient_checkpointing
             block_crossattn_cache = None if torch.is_grad_enabled() else crossattn_cache[block_index]
+            block_forward = create_custom_forward(block)
             if use_block_checkpoint:
                 checkpoint_kv_cache = kv_cache[block_index]
                 if isinstance(checkpoint_kv_cache, PackLayerCacheState):
@@ -856,6 +898,8 @@ class CausalWanModelPackForcing(CausalWanModel):
                 checkpoint_kwargs.pop("pack_compressed_hidden", None)
                 checkpoint_kwargs.pop("pack_compressed_grid_sizes", None)
                 checkpoint_kwargs.pop("pack_history_mid_latents", None)
+                checkpoint_kwargs.pop("pack_history_mid_hidden", None)
+                checkpoint_kwargs.pop("pack_history_mid_grid_sizes", None)
                 checkpoint_kwargs.update(
                     {
                         "kv_cache": checkpoint_kv_cache,
@@ -865,11 +909,13 @@ class CausalWanModelPackForcing(CausalWanModel):
                     }
                 )
                 x = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
+                    block_forward,
                     x,
                     pack_compressed_hidden,
                     pack_compressed_grid_sizes,
                     pack_history_mid_latents,
+                    pack_history_mid_hidden,
+                    pack_history_mid_grid_sizes,
                     **checkpoint_kwargs,
                     use_reentrant=False,
                 )
@@ -882,7 +928,15 @@ class CausalWanModelPackForcing(CausalWanModel):
                         "cache_start": cache_start,
                     }
                 )
-                x = block(x, **kwargs)
+                x = block_forward(
+                    x,
+                    pack_compressed_hidden,
+                    pack_compressed_grid_sizes,
+                    pack_history_mid_latents,
+                    pack_history_mid_hidden,
+                    pack_history_mid_grid_sizes,
+                    **kwargs,
+                )
 
         if (
             kv_cache is not None

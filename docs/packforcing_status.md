@@ -159,6 +159,21 @@ Current pass criterion is:
 
 Exact numeric equality is not currently required for this smoke.
 
+## Debugging Workflow
+
+PackForcing debug runs should be launched in `tmux`, not in an ephemeral
+foreground shell.
+
+The standard rule is:
+
+- check free GPUs first
+- start the run in a dedicated `tmux` session
+- pipe stdout/stderr through `tee` into a stable log file under `logs/`
+- record the session name, config path, log path, attach command, and stop command
+
+This avoids losing logs when an interactive session is interrupted and makes it
+easy to inspect progress or stop a run safely.
+
 ## Dataset Note
 
 PackForcing training and validation should use:

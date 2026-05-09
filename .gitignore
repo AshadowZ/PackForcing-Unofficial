@@ -5,5 +5,6 @@ ckpt
 wan_models
 checkpoints
 output
+logs
 dataset
 prompts/vidprom_filtered_extended.txt
