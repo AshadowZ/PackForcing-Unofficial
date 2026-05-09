@@ -12,7 +12,7 @@ from wan.modules.t5 import umt5_xxl
 from wan.modules.causal_model import CausalWanModel
 from wan.modules.causal_model_deepforcing import CausalWanModelDeepForcing
 from wan.modules.causal_model_packforcing import CausalWanModelPackForcing
-from wan.modules.pack_cache import reset_pack_layer_cache
+from wan.modules.pack_cache import PackCacheHandle
 
 
 def _find_repo_root(start: Path) -> Path:
@@ -242,8 +242,12 @@ class WanDiffusionWrapper(torch.nn.Module):
         concat_time_embeddings: Optional[bool] = False,
         clean_x: Optional[torch.Tensor] = None,
         aug_t: Optional[torch.Tensor] = None,
-        cache_start: Optional[int] = None
+        cache_start: Optional[int] = None,
+        pack_cache_commit: bool = False,
+        pack_cache_mode: Optional[str] = None,
+        pack_cache_only: bool = False,
     ) -> torch.Tensor:
+        del pack_cache_commit, pack_cache_mode, pack_cache_only
         prompt_embeds = conditional_dict["prompt_embeds"]
 
         if self.uniform_timestep:
@@ -324,7 +328,16 @@ class WanDiffusionWrapper(torch.nn.Module):
         """
         self.get_scheduler()
 
-    def build_kv_cache(self, batch_size: int, dtype: torch.dtype, device: torch.device, num_transformer_blocks: int, frame_seq_length: int):
+    def build_kv_cache(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        num_transformer_blocks: int,
+        frame_seq_length: int,
+        cache_mode: Optional[str] = None,
+    ):
+        del cache_mode
         kv_cache = []
         if self.model.local_attn_size != -1:
             kv_cache_size = self.model.local_attn_size * frame_seq_length
@@ -344,6 +357,26 @@ class WanDiffusionWrapper(torch.nn.Module):
         for layer_cache in kv_cache:
             layer_cache["global_end_index"] = torch.tensor([0], dtype=torch.long, device=device)
             layer_cache["local_end_index"] = torch.tensor([0], dtype=torch.long, device=device)
+
+    def commit_kv_cache(
+        self,
+        noisy_image_or_video: torch.Tensor,
+        conditional_dict: dict,
+        timestep: torch.Tensor,
+        kv_cache,
+        crossattn_cache=None,
+        current_start: Optional[int] = None,
+        cache_start: Optional[int] = None,
+    ) -> None:
+        _ = self(
+            noisy_image_or_video=noisy_image_or_video,
+            conditional_dict=conditional_dict,
+            timestep=timestep,
+            kv_cache=kv_cache,
+            crossattn_cache=crossattn_cache,
+            current_start=current_start,
+            cache_start=cache_start,
+        )
 
     def uses_structured_kv_cache(self) -> bool:
         return False
@@ -641,6 +674,9 @@ class WanDiffusionWrapperPackForcing(WanDiffusionWrapper):
         clean_x: Optional[torch.Tensor] = None,
         aug_t: Optional[torch.Tensor] = None,
         cache_start: Optional[int] = None,
+        pack_cache_commit: bool = False,
+        pack_cache_mode: Optional[str] = None,
+        pack_cache_only: bool = False,
     ) -> torch.Tensor:
         prompt_embeds = conditional_dict["prompt_embeds"]
 
@@ -651,7 +687,11 @@ class WanDiffusionWrapperPackForcing(WanDiffusionWrapper):
 
         logits = None
         if kv_cache is not None:
-            flow_pred = self.model(
+            if not isinstance(kv_cache, PackCacheHandle):
+                raise TypeError(
+                    "WanDiffusionWrapperPackForcing expects kv_cache to be a PackCacheHandle."
+                )
+            model_out = self.model(
                 noisy_image_or_video.permute(0, 2, 1, 3, 4),
                 t=input_timestep,
                 context=prompt_embeds,
@@ -659,9 +699,25 @@ class WanDiffusionWrapperPackForcing(WanDiffusionWrapper):
                 crossattn_cache=crossattn_cache,
                 current_start=current_start,
                 cache_start=cache_start,
+                kv_cache=kv_cache,
                 pack_use_internal_kv_cache=True,
-            ).permute(0, 2, 1, 3, 4)
+                pack_cache_session_id=kv_cache.session_id,
+                pack_cache_mode=pack_cache_mode or kv_cache.mode,
+                pack_cache_commit=pack_cache_commit,
+                pack_cache_only=pack_cache_only,
+            )
+            if pack_cache_only:
+                if model_out is not None:
+                    raise RuntimeError(
+                        "PackForcing cache-only forward expected the model to return None."
+                    )
+                return None
+            flow_pred = model_out.permute(0, 2, 1, 3, 4)
         else:
+            if pack_cache_only:
+                raise RuntimeError(
+                    "PackForcing cache-only forward requires kv_cache and the internal cache path."
+                )
             if clean_x is not None:
                 flow_pred = self.model(
                     noisy_image_or_video.permute(0, 2, 1, 3, 4),
@@ -704,18 +760,47 @@ class WanDiffusionWrapperPackForcing(WanDiffusionWrapper):
 
         return flow_pred, pred_x0
 
-    def build_kv_cache(self, batch_size: int, dtype: torch.dtype, device: torch.device, num_transformer_blocks: int, frame_seq_length: int):
+    def build_kv_cache(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        num_transformer_blocks: int,
+        frame_seq_length: int,
+        cache_mode: Optional[str] = None,
+    ):
         del batch_size, dtype, device, num_transformer_blocks, frame_seq_length
         core_model = self._get_pack_core_model()
-        core_model.reset_pack_layer_cache()
-        core_model.reset_pack_source_cache()
-        return core_model.get_pack_layer_cache()
+        return core_model.create_pack_cache_handle(cache_mode=cache_mode)
 
     def reset_kv_cache(self, kv_cache, device: torch.device) -> None:
-        del kv_cache, device
+        del device
+        if not isinstance(kv_cache, PackCacheHandle):
+            raise TypeError("PackForcing reset_kv_cache expects a PackCacheHandle.")
         core_model = self._get_pack_core_model()
-        core_model.reset_pack_layer_cache()
-        core_model.reset_pack_source_cache()
+        core_model.reset_pack_cache_session(kv_cache)
+
+    def commit_kv_cache(
+        self,
+        noisy_image_or_video: torch.Tensor,
+        conditional_dict: dict,
+        timestep: torch.Tensor,
+        kv_cache,
+        crossattn_cache=None,
+        current_start: Optional[int] = None,
+        cache_start: Optional[int] = None,
+    ) -> None:
+        _ = self(
+            noisy_image_or_video=noisy_image_or_video,
+            conditional_dict=conditional_dict,
+            timestep=timestep,
+            kv_cache=kv_cache,
+            crossattn_cache=crossattn_cache,
+            current_start=current_start,
+            cache_start=cache_start,
+            pack_cache_commit=True,
+            pack_cache_only=True,
+        )
 
     def uses_structured_kv_cache(self) -> bool:
         return True

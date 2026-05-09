@@ -394,7 +394,7 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
 
             # Update KV cache for next block
             if idx != len(all_num_frames) - 1:
-                transformer(
+                transformer.commit_kv_cache(
                     noisy_image_or_video=denoised_pred,
                     conditional_dict=conditional_dict,
                     timestep=torch.zeros_like(timestep),

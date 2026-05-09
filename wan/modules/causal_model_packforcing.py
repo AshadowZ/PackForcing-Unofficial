@@ -22,6 +22,7 @@ from wan.modules.pack_cache import (
     FullResKVBlock,
     IdentityCompressor,
     PackBlockCompressor,
+    PackCacheHandle,
     PackCacheConfig,
     PackLayerCacheState,
     PackSourceCacheState,
@@ -34,6 +35,8 @@ from wan.modules.pack_cache import (
     maybe_reuse_or_select_mid_blocks,
     reset_pack_layer_cache,
     select_mid_blocks,
+    validate_pack_cache_mode,
+    _normalize_precomputed_mid_block,
 )
 
 
@@ -83,6 +86,13 @@ class PackConfig:
         )
 
 
+@dataclass
+class _PackCacheSession:
+    mode: str
+    layer_cache: list[PackLayerCacheState]
+    source_state: PackSourceCacheState
+
+
 def init_pack_kv_cache(
     num_layers: int,
     pack_cfg: PackCacheConfig,
@@ -120,10 +130,9 @@ class CausalWanSelfAttentionPackForcing(CausalWanSelfAttention):
         cache_start=None,
         pack_compressed_hidden=None,
         pack_compressed_grid_sizes=None,
-        pack_history_mid_latents=None,
         pack_history_mid_hidden=None,
         pack_history_mid_grid_sizes=None,
-        pack_source_latent=None,
+        pack_cache_update_enabled: bool = False,
     ):
         if kv_cache is None or not self.pack_cfg.enable:
             return super().forward(
@@ -167,7 +176,7 @@ class CausalWanSelfAttentionPackForcing(CausalWanSelfAttention):
         tail = _get_tail_fullres_block(kv_cache)
         has_same_block_cached = tail is not None and tail.meta.start_frame == current_start_frame
         has_any_history = bool(kv_cache.sink_blocks or kv_cache.recent_blocks or kv_cache.mid_blocks)
-        allow_cache_mutation = not torch.is_grad_enabled()
+        allow_cache_mutation = pack_cache_update_enabled
         history_state = kv_cache
         effective_has_same_block_cached = has_same_block_cached
         if has_same_block_cached and not allow_cache_mutation:
@@ -195,7 +204,6 @@ class CausalWanSelfAttentionPackForcing(CausalWanSelfAttention):
                     start_frame=current_start_frame,
                     compressor=compressor,
                     precomputed_mid=precomputed_mid,
-                    source_latent=pack_source_latent,
                 )
             x = x.flatten(2)
             x = self.o(x)
@@ -217,7 +225,6 @@ class CausalWanSelfAttentionPackForcing(CausalWanSelfAttention):
                 start_frame=current_start_frame,
                 compressor=compressor,
                 precomputed_mid=precomputed_mid,
-                source_latent=pack_source_latent,
             )
 
         selected_mid_indices = None
@@ -297,7 +304,6 @@ class CausalWanSelfAttentionPackForcing(CausalWanSelfAttention):
                 start_frame=current_start_frame,
                 compressor=compressor,
                 precomputed_mid=precomputed_mid,
-                source_latent=pack_source_latent,
             )
 
         x = x.flatten(2)
@@ -507,10 +513,9 @@ class CausalWanAttentionBlockPackForcing(nn.Module):
         cache_start=None,
         pack_compressed_hidden=None,
         pack_compressed_grid_sizes=None,
-        pack_history_mid_latents=None,
         pack_history_mid_hidden=None,
         pack_history_mid_grid_sizes=None,
-        pack_source_latent=None,
+        pack_cache_update_enabled: bool = False,
     ):
         num_frames, frame_seqlen = e.shape[1], x.shape[1] // e.shape[1]
         e = (self.modulation.unsqueeze(1) + e).chunk(6, dim=2)
@@ -526,10 +531,9 @@ class CausalWanAttentionBlockPackForcing(nn.Module):
             cache_start,
             pack_compressed_hidden,
             pack_compressed_grid_sizes,
-            pack_history_mid_latents,
             pack_history_mid_hidden,
             pack_history_mid_grid_sizes,
-            pack_source_latent,
+            pack_cache_update_enabled,
         )
         x = x + (y.unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * e[2]).flatten(1, 2)
 
@@ -624,8 +628,8 @@ class CausalWanModelPackForcing(CausalWanModel):
             if self.pack_cfg.enable and self.pack_cfg.compress_mode == "hr_spatial"
             else None
         )
-        self.pack_layer_cache = self.make_pack_kv_cache()
-        self.pack_source_state = PackSourceCacheState()
+        self._pack_cache_sessions: dict[int, _PackCacheSession] = {}
+        self._next_pack_cache_session_id = 0
 
         cross_attn_type = 't2v_cross_attn' if model_type == 't2v' else 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
@@ -652,32 +656,117 @@ class CausalWanModelPackForcing(CausalWanModel):
         )
         return init_pack_kv_cache(self.num_layers, pack_cache_cfg)
 
-    def get_pack_layer_cache(self) -> list[PackLayerCacheState]:
-        if self.pack_layer_cache is None:
-            self.pack_layer_cache = self.make_pack_kv_cache()
-        return self.pack_layer_cache
+    def _reset_pack_layer_cache_state(self, layer_cache: list[PackLayerCacheState]) -> None:
+        for cache_state in layer_cache:
+            cache_state.cfg.num_frame_per_block = self.num_frame_per_block
+            reset_pack_layer_cache(cache_state)
 
-    def reset_pack_layer_cache(self) -> None:
-        for layer_cache in self.get_pack_layer_cache():
-            layer_cache.cfg.num_frame_per_block = self.num_frame_per_block
-            reset_pack_layer_cache(layer_cache)
+    def _reset_pack_source_cache_state(self, source_state: PackSourceCacheState) -> None:
+        source_state.recent_blocks.clear()
+        source_state.mid_blocks.clear()
+        source_state.next_block_id = 0
+        source_state.total_committed_blocks = 0
+        source_state.batch_size = None
+        source_state.last_block_start_frame = None
 
-    def reset_pack_source_cache(self) -> None:
-        self.pack_source_state.recent_blocks.clear()
-        self.pack_source_state.mid_blocks.clear()
-        self.pack_source_state.next_block_id = 0
-        self.pack_source_state.total_committed_blocks = 0
-        self.pack_source_state.batch_size = None
-        self.pack_source_state.last_block_start_frame = None
+    def create_pack_cache_handle(self, cache_mode: str | None = None) -> PackCacheHandle:
+        mode = validate_pack_cache_mode(cache_mode)
+        session_id = self._next_pack_cache_session_id
+        self._next_pack_cache_session_id += 1
+        self._pack_cache_sessions[session_id] = _PackCacheSession(
+            mode=mode,
+            layer_cache=self.make_pack_kv_cache(),
+            source_state=PackSourceCacheState(),
+        )
+        return PackCacheHandle(session_id=session_id, mode=mode)
 
-    def _gather_history_mid_latents(
+    def _require_pack_cache_session(
         self,
+        session_id: int,
+        cache_mode: str | None = None,
+    ) -> _PackCacheSession:
+        session = self._pack_cache_sessions.get(session_id)
+        if session is None:
+            raise RuntimeError(
+                f"PackForcing cache session {session_id} does not exist on this model replica."
+            )
+        expected_mode = validate_pack_cache_mode(cache_mode)
+        if session.mode != expected_mode:
+            raise RuntimeError(
+                "PackForcing cache mode mismatch for session "
+                f"{session_id}: expected {session.mode}, got {expected_mode}."
+            )
+        return session
+
+    def reset_pack_cache_session(self, handle: PackCacheHandle) -> None:
+        session = self._require_pack_cache_session(handle.session_id, handle.mode)
+        self._reset_pack_layer_cache_state(session.layer_cache)
+        self._reset_pack_source_cache_state(session.source_state)
+
+    def get_pack_layer_cache(self, handle: PackCacheHandle) -> list[PackLayerCacheState]:
+        return self._require_pack_cache_session(handle.session_id, handle.mode).layer_cache
+
+    def reset_pack_layer_cache(self, handle: PackCacheHandle) -> None:
+        session = self._require_pack_cache_session(handle.session_id, handle.mode)
+        self._reset_pack_layer_cache_state(session.layer_cache)
+
+    def reset_pack_source_cache(self, handle: PackCacheHandle) -> None:
+        session = self._require_pack_cache_session(handle.session_id, handle.mode)
+        self._reset_pack_source_cache_state(session.source_state)
+
+    def _gather_history_mid_source_blocks(
+        self,
+        source_state: PackSourceCacheState,
+    ) -> list[SourceLatentBlock]:
+        if not source_state.mid_blocks:
+            return []
+
+        return list(source_state.mid_blocks)
+
+    def _validate_history_mid_block_alignment(
+        self,
+        layer_caches: list[PackLayerCacheState],
+        source_mid_blocks: list[SourceLatentBlock],
+    ) -> None:
+        if not source_mid_blocks:
+            return
+
+        reference_signature = [
+            (block.meta.block_id, block.meta.start_frame, block.meta.num_frames)
+            for block in source_mid_blocks
+        ]
+        expected_len = len(reference_signature)
+
+        for layer_idx, layer_cache in enumerate(layer_caches):
+            layer_mid_blocks = get_mid_candidate_blocks(layer_cache)
+            if len(layer_mid_blocks) != expected_len:
+                raise RuntimeError(
+                    "PackForcing history mid block count mismatch between source cache "
+                    f"({expected_len}) and layer {layer_idx} ({len(layer_mid_blocks)})."
+                )
+
+            layer_signature = [
+                (
+                    block.meta.source_block_id,
+                    block.meta.start_frame,
+                    block.meta.num_frames,
+                )
+                for block in layer_mid_blocks
+            ]
+            if layer_signature != reference_signature:
+                raise RuntimeError(
+                    "PackForcing history mid block metadata mismatch between source cache "
+                    f"and layer {layer_idx}: expected {reference_signature}, got {layer_signature}."
+                )
+
+    def _stack_history_mid_latents(
+        self,
+        source_mid_blocks: list[SourceLatentBlock],
     ) -> torch.Tensor | None:
-        source_state = self.pack_source_state
-        if source_state is None or not source_state.mid_blocks:
+        if not source_mid_blocks:
             return None
 
-        latents = [block.latent for block in source_state.mid_blocks]
+        latents = [block.latent for block in source_mid_blocks]
         latent_shapes = {tuple(latent.shape) for latent in latents}
         if len(latent_shapes) != 1:
             raise ValueError(
@@ -718,10 +807,11 @@ class CausalWanModelPackForcing(CausalWanModel):
 
     def _commit_source_latent_block(
         self,
+        source_state: PackSourceCacheState,
         source_latent: torch.Tensor,
         start_frame: int,
     ) -> None:
-        state = self.pack_source_state
+        state = source_state
         if source_latent.ndim != 5:
             raise ValueError(
                 "PackForcing source latent blocks must have shape [B, C, T, H, W], "
@@ -779,11 +869,33 @@ class CausalWanModelPackForcing(CausalWanModel):
         crossattn_cache: dict = None,
         current_start: int = 0,
         cache_start: int = 0,
+        pack_cache_session_id: int | None = None,
+        pack_cache_mode: str | None = None,
+        pack_cache_commit: bool = False,
+        pack_cache_only: bool = False,
     ):
         if self.model_type == 'i2v':
             assert clip_fea is not None and y is not None
 
-        kv_cache = self.get_pack_layer_cache()
+        if kv_cache is None:
+            raise RuntimeError("PackForcing internal cache path requires a cache handle.")
+        if pack_cache_session_id is None:
+            raise RuntimeError("PackForcing internal cache path requires pack_cache_session_id.")
+
+        session = self._require_pack_cache_session(
+            session_id=pack_cache_session_id,
+            cache_mode=pack_cache_mode,
+        )
+        kv_cache = session.layer_cache
+        source_state = session.source_state
+        should_update_cache = (
+            not torch.is_grad_enabled()
+            and (session.mode == "rollout_compatible" or pack_cache_commit)
+        )
+        if pack_cache_only and not should_update_cache:
+            raise RuntimeError(
+                "PackForcing cache-only forward requires a cache-mutation step."
+            )
 
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
@@ -795,7 +907,6 @@ class CausalWanModelPackForcing(CausalWanModel):
         raw_latent_batch = x if isinstance(x, torch.Tensor) else torch.stack(x)
         pack_compressed_hidden = None
         pack_compressed_grid_sizes = None
-        pack_history_mid_latents = None
         pack_history_mid_hidden = None
         pack_history_mid_grid_sizes = None
         if (
@@ -805,11 +916,13 @@ class CausalWanModelPackForcing(CausalWanModel):
             and self.pack_cfg.compress_mode == "hr_spatial"
         ):
             if torch.is_grad_enabled():
-                pack_history_mid_latents = self._gather_history_mid_latents()
+                source_mid_blocks = self._gather_history_mid_source_blocks(source_state)
+                self._validate_history_mid_block_alignment(kv_cache, source_mid_blocks)
+                history_mid_latents = self._stack_history_mid_latents(source_mid_blocks)
                 pack_history_mid_hidden, pack_history_mid_grid_sizes = self._compress_history_mid_latents(
-                    pack_history_mid_latents
+                    history_mid_latents
                 )
-            else:
+            elif should_update_cache:
                 pack_compressed_hidden, pack_compressed_grid_sizes = self.pack_compressor.compress_latent(
                     raw_latent_batch
                 )
@@ -850,10 +963,9 @@ class CausalWanModelPackForcing(CausalWanModel):
             block_mask=self.block_mask,
             pack_compressed_hidden=pack_compressed_hidden,
             pack_compressed_grid_sizes=pack_compressed_grid_sizes,
-            pack_history_mid_latents=pack_history_mid_latents,
             pack_history_mid_hidden=pack_history_mid_hidden,
             pack_history_mid_grid_sizes=pack_history_mid_grid_sizes,
-            pack_source_latent=raw_latent_batch,
+            pack_cache_update_enabled=should_update_cache,
         )
 
         def create_custom_forward(module):
@@ -861,7 +973,6 @@ class CausalWanModelPackForcing(CausalWanModel):
                 x_inp,
                 compressed_hidden_inp,
                 compressed_grid_sizes_inp,
-                history_mid_latents_inp,
                 history_mid_hidden_inp,
                 history_mid_grid_sizes_inp,
                 *inputs,
@@ -870,17 +981,17 @@ class CausalWanModelPackForcing(CausalWanModel):
                 call_kwargs = dict(inner_kwargs)
                 call_kwargs.pop("pack_compressed_hidden", None)
                 call_kwargs.pop("pack_compressed_grid_sizes", None)
-                call_kwargs.pop("pack_history_mid_latents", None)
                 call_kwargs.pop("pack_history_mid_hidden", None)
                 call_kwargs.pop("pack_history_mid_grid_sizes", None)
+                call_kwargs.pop("pack_cache_update_enabled", None)
                 x_out = module(
                     x_inp,
                     *inputs,
                     pack_compressed_hidden=compressed_hidden_inp,
                     pack_compressed_grid_sizes=compressed_grid_sizes_inp,
-                    pack_history_mid_latents=history_mid_latents_inp,
                     pack_history_mid_hidden=history_mid_hidden_inp,
                     pack_history_mid_grid_sizes=history_mid_grid_sizes_inp,
+                    pack_cache_update_enabled=should_update_cache,
                     **call_kwargs,
                 )
                 return x_out
@@ -897,7 +1008,6 @@ class CausalWanModelPackForcing(CausalWanModel):
                 checkpoint_kwargs = dict(kwargs)
                 checkpoint_kwargs.pop("pack_compressed_hidden", None)
                 checkpoint_kwargs.pop("pack_compressed_grid_sizes", None)
-                checkpoint_kwargs.pop("pack_history_mid_latents", None)
                 checkpoint_kwargs.pop("pack_history_mid_hidden", None)
                 checkpoint_kwargs.pop("pack_history_mid_grid_sizes", None)
                 checkpoint_kwargs.update(
@@ -913,7 +1023,6 @@ class CausalWanModelPackForcing(CausalWanModel):
                     x,
                     pack_compressed_hidden,
                     pack_compressed_grid_sizes,
-                    pack_history_mid_latents,
                     pack_history_mid_hidden,
                     pack_history_mid_grid_sizes,
                     **checkpoint_kwargs,
@@ -932,7 +1041,6 @@ class CausalWanModelPackForcing(CausalWanModel):
                     x,
                     pack_compressed_hidden,
                     pack_compressed_grid_sizes,
-                    pack_history_mid_latents,
                     pack_history_mid_hidden,
                     pack_history_mid_grid_sizes,
                     **kwargs,
@@ -942,10 +1050,13 @@ class CausalWanModelPackForcing(CausalWanModel):
             kv_cache is not None
             and self.pack_cfg.enable
             and self.pack_cfg.compress_mode == "hr_spatial"
-            and not torch.is_grad_enabled()
+            and should_update_cache
         ):
             current_start_frame = current_start // int(torch.prod(grid_sizes[0][1:]).item())
-            self._commit_source_latent_block(raw_latent_batch, current_start_frame)
+            self._commit_source_latent_block(source_state, raw_latent_batch, current_start_frame)
+
+        if pack_cache_only:
+            return None
 
         x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))
         x = self.unpatchify(x, grid_sizes)
@@ -998,13 +1109,17 @@ def _upsert_pack_cache_block(
     start_frame: int,
     compressor: PackBlockCompressor,
     precomputed_mid: CompressedKVBlock | None = None,
-    source_latent: torch.Tensor | None = None,
 ) -> None:
     """Update the current block in-place across denoising steps, or append a new block."""
 
     tail = _get_tail_fullres_block(state)
     if tail is not None and tail.meta.start_frame == start_frame:
-        updated_precomputed_mid = precomputed_mid if precomputed_mid is not None else tail.precomputed_mid
+        updated_precomputed_mid = tail.precomputed_mid
+        if precomputed_mid is not None:
+            updated_precomputed_mid = _normalize_precomputed_mid_block(
+                FullResKVBlock(k=roped_key, v=value, meta=tail.meta),
+                precomputed_mid,
+            )
         updated = FullResKVBlock(
             k=roped_key,
             v=value,
@@ -1026,7 +1141,6 @@ def _upsert_pack_cache_block(
         start_frame=start_frame,
         compressor=compressor,
         precomputed_mid=precomputed_mid,
-        source_latent=source_latent,
     )
 
 

@@ -7,6 +7,35 @@ from typing import Protocol
 import torch
 import torch.nn.functional as F
 
+PACK_CACHE_MODE_ROLLOUT_COMPATIBLE = "rollout_compatible"
+PACK_CACHE_MODE_FINALIZED_CHUNK_ONLY = "finalized_chunk_only"
+VALID_PACK_CACHE_MODES = {
+    PACK_CACHE_MODE_ROLLOUT_COMPATIBLE,
+    PACK_CACHE_MODE_FINALIZED_CHUNK_ONLY,
+}
+
+
+def validate_pack_cache_mode(mode: str | None) -> str:
+    if mode is None:
+        return PACK_CACHE_MODE_ROLLOUT_COMPATIBLE
+    if mode not in VALID_PACK_CACHE_MODES:
+        raise ValueError(
+            f"Unsupported PackForcing cache mode {mode!r}. "
+            f"Expected one of {sorted(VALID_PACK_CACHE_MODES)}."
+        )
+    return mode
+
+
+@dataclass(frozen=True)
+class PackCacheHandle:
+    """Opaque handle for one model-internal PackForcing cache session."""
+
+    session_id: int
+    mode: str = PACK_CACHE_MODE_ROLLOUT_COMPATIBLE
+
+    def __post_init__(self) -> None:
+        validate_pack_cache_mode(self.mode)
+
 
 @dataclass
 class PackCacheConfig:
@@ -112,7 +141,6 @@ class PackAttentionView:
     recent_token_count: int
     ordered_block_meta_per_batch: list[list[BlockMeta]]
     packed_start_frames_per_batch: list[list[int]]
-    expected_query_start_frames: list[int]  # Anchor end frame used to backward-pack history.
 
 
 @dataclass
@@ -197,7 +225,6 @@ def commit_fullres_block(
     start_frame: int,
     compressor: PackBlockCompressor,
     precomputed_mid: CompressedKVBlock | None = None,
-    source_latent: torch.Tensor | None = None,
 ) -> None:
     """Commit a generated block into sink/recent/mid history."""
 
@@ -212,7 +239,6 @@ def commit_fullres_block(
     if precomputed_mid is not None:
         precomputed_mid = _normalize_precomputed_mid_block(block, precomputed_mid)
         block = FullResKVBlock(k=block.k, v=block.v, meta=block.meta, precomputed_mid=precomputed_mid)
-    _maybe_upsert_source_block(state, block.meta, source_latent)
 
     if len(state.sink_blocks) < state.cfg.sink_blocks:
         state.sink_blocks.append(block)
@@ -345,10 +371,6 @@ def build_attention_view(
         _build_packed_start_frames(meta_list, anchor_end_frame)
         for meta_list in ordered_block_meta_per_batch
     ]
-    expected_query_start_frames = [
-        _compute_expected_query_start_frame(anchor_end_frame)
-        for meta_list in ordered_block_meta_per_batch
-    ]
 
     return PackAttentionView(
         history_k=history_k,
@@ -358,7 +380,6 @@ def build_attention_view(
         recent_token_count=recent_k.shape[1],
         ordered_block_meta_per_batch=ordered_block_meta_per_batch,
         packed_start_frames_per_batch=packed_start_frames_per_batch,
-        expected_query_start_frames=expected_query_start_frames,
     )
 
 
@@ -457,14 +478,6 @@ def _normalize_precomputed_mid_block(
     )
 
 
-def _maybe_upsert_source_block(
-    state: PackLayerCacheState,
-    block_meta: BlockMeta,
-    source_latent: torch.Tensor | None,
-) -> None:
-    del state, block_meta, source_latent
-
-
 def _evict_mid_blocks_if_needed(state: PackLayerCacheState) -> None:
     if state.cfg.evict_mode != "fifo":
         raise ValueError(f"Unsupported evict_mode={state.cfg.evict_mode}.")
@@ -538,12 +551,6 @@ def _build_packed_start_frames(
         cursor -= meta.packed_frame_span
         packed_positions[i] = cursor
     return packed_positions
-
-
-def _compute_expected_query_start_frame(anchor_end_frame: int) -> int:
-    return int(anchor_end_frame)
-
-
 def _cat_blocks(
     k_blocks: list[torch.Tensor],
     v_blocks: list[torch.Tensor],

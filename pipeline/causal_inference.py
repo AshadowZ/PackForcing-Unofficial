@@ -139,7 +139,7 @@ class CausalInferencePipeline(torch.nn.Module):
                 assert (num_input_frames - 1) % self.num_frame_per_block == 0
                 num_input_blocks = (num_input_frames - 1) // self.num_frame_per_block
                 output[:, :1] = initial_latent[:, :1]
-                self.generator(
+                self.generator.commit_kv_cache(
                     noisy_image_or_video=initial_latent[:, :1],
                     conditional_dict=conditional_dict,
                     timestep=timestep * 0,
@@ -157,7 +157,7 @@ class CausalInferencePipeline(torch.nn.Module):
                 current_ref_latents = \
                     initial_latent[:, current_start_frame:current_start_frame + self.num_frame_per_block]
                 output[:, current_start_frame:current_start_frame + self.num_frame_per_block] = current_ref_latents
-                self.generator(
+                self.generator.commit_kv_cache(
                     noisy_image_or_video=current_ref_latents,
                     conditional_dict=conditional_dict,
                     timestep=timestep * 0,
@@ -225,7 +225,7 @@ class CausalInferencePipeline(torch.nn.Module):
             # Step 3.3: rerun with timestep zero to update KV cache using clean context
             context_timestep = torch.ones_like(timestep) * self.args.context_noise
             
-            self.generator(
+            self.generator.commit_kv_cache(
                 noisy_image_or_video=denoised_pred,
                 conditional_dict=conditional_dict,
                 timestep=context_timestep,
@@ -289,6 +289,7 @@ class CausalInferencePipeline(torch.nn.Module):
             device=device,
             num_transformer_blocks=self.num_transformer_blocks,
             frame_seq_length=self.frame_seq_length,
+            cache_mode="finalized_chunk_only",
         )
 
     def _initialize_crossattn_cache(self, batch_size, dtype, device):

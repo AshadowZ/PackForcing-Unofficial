@@ -253,6 +253,7 @@ class SelfForcingTrainingPipeline:
             device=device,
             num_transformer_blocks=self.num_transformer_blocks,
             frame_seq_length=self.frame_seq_length,
+            cache_mode="rollout_compatible",
         )
 
     def _reset_kv_cache(self, device):
