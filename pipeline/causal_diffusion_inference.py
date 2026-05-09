@@ -131,19 +131,19 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     noisy_image_or_video=initial_latent[:, :1],
                     conditional_dict=conditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache_pos,
                     crossattn_cache=self.crossattn_cache_pos,
                     current_start=current_start_frame * self.frame_seq_length,
                     cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_commit_kwargs(self.kv_cache_pos),
                 )
                 self.generator.commit_kv_cache(
                     noisy_image_or_video=initial_latent[:, :1],
                     conditional_dict=unconditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache_neg,
                     crossattn_cache=self.crossattn_cache_neg,
                     current_start=current_start_frame * self.frame_seq_length,
                     cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_commit_kwargs(self.kv_cache_neg),
                 )
                 current_start_frame += 1
                 cache_start_frame += 1
@@ -160,19 +160,19 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     noisy_image_or_video=current_ref_latents,
                     conditional_dict=conditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache_pos,
                     crossattn_cache=self.crossattn_cache_pos,
                     current_start=current_start_frame * self.frame_seq_length,
                     cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_commit_kwargs(self.kv_cache_pos),
                 )
                 self.generator.commit_kv_cache(
                     noisy_image_or_video=current_ref_latents,
                     conditional_dict=unconditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache_neg,
                     crossattn_cache=self.crossattn_cache_neg,
                     current_start=current_start_frame * self.frame_seq_length,
                     cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_commit_kwargs(self.kv_cache_neg),
                 )
                 current_start_frame += self.num_frame_per_block
                 cache_start_frame += self.num_frame_per_block
@@ -198,19 +198,19 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     noisy_image_or_video=latent_model_input,
                     conditional_dict=conditional_dict,
                     timestep=timestep,
-                    kv_cache=self.kv_cache_pos,
                     crossattn_cache=self.crossattn_cache_pos,
                     current_start=current_start_frame * self.frame_seq_length,
-                    cache_start=cache_start_frame * self.frame_seq_length
+                    cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_forward_kwargs(self.kv_cache_pos),
                 )
                 flow_pred_uncond, _ = self.generator(
                     noisy_image_or_video=latent_model_input,
                     conditional_dict=unconditional_dict,
                     timestep=timestep,
-                    kv_cache=self.kv_cache_neg,
                     crossattn_cache=self.crossattn_cache_neg,
                     current_start=current_start_frame * self.frame_seq_length,
-                    cache_start=cache_start_frame * self.frame_seq_length
+                    cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_forward_kwargs(self.kv_cache_neg),
                 )
 
                 flow_pred = flow_pred_uncond + self.args.guidance_scale * (
@@ -234,19 +234,19 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                 noisy_image_or_video=latents,
                 conditional_dict=conditional_dict,
                 timestep=timestep * 0,
-                kv_cache=self.kv_cache_pos,
                 crossattn_cache=self.crossattn_cache_pos,
                 current_start=current_start_frame * self.frame_seq_length,
                 cache_start=cache_start_frame * self.frame_seq_length,
+                **self._cache_commit_kwargs(self.kv_cache_pos),
             )
             self.generator.commit_kv_cache(
                 noisy_image_or_video=latents,
                 conditional_dict=unconditional_dict,
                 timestep=timestep * 0,
-                kv_cache=self.kv_cache_neg,
                 crossattn_cache=self.crossattn_cache_neg,
                 current_start=current_start_frame * self.frame_seq_length,
                 cache_start=cache_start_frame * self.frame_seq_length,
+                **self._cache_commit_kwargs(self.kv_cache_neg),
             )
 
             # Step 3.4: update the start and end frame indices
@@ -360,19 +360,19 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     noisy_image_or_video=current_ref_latents,
                     conditional_dict=conditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache_pos,
                     crossattn_cache=self.crossattn_cache_pos,
                     current_start=current_start_frame * self.frame_seq_length,
                     cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_commit_kwargs(self.kv_cache_pos),
                 )
                 self.generator.commit_kv_cache(
                     noisy_image_or_video=current_ref_latents,
                     conditional_dict=unconditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache_neg,
                     crossattn_cache=self.crossattn_cache_neg,
                     current_start=current_start_frame * self.frame_seq_length,
                     cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_commit_kwargs(self.kv_cache_neg),
                 )
                 current_start_frame += self.num_frame_per_block
                 cache_start_frame += self.num_frame_per_block
@@ -401,19 +401,19 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     noisy_image_or_video=latents,
                     conditional_dict=conditional_dict,
                     timestep=timestep,
-                    kv_cache=self.kv_cache_pos,
                     crossattn_cache=self.crossattn_cache_pos,
                     current_start=current_start_frame * self.frame_seq_length,
-                    cache_start=cache_start_frame * self.frame_seq_length
+                    cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_forward_kwargs(self.kv_cache_pos),
                 )
                 flow_pred_uncond, _ = self.generator(
                     noisy_image_or_video=latents,
                     conditional_dict=unconditional_dict,
                     timestep=timestep,
-                    kv_cache=self.kv_cache_neg,
                     crossattn_cache=self.crossattn_cache_neg,
                     current_start=current_start_frame * self.frame_seq_length,
-                    cache_start=cache_start_frame * self.frame_seq_length
+                    cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_forward_kwargs(self.kv_cache_neg),
                 )
 
                 flow_pred = flow_pred_uncond + self.args.guidance_scale * (flow_pred_cond - flow_pred_uncond)
@@ -433,19 +433,19 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                 noisy_image_or_video=latents,
                 conditional_dict=conditional_dict,
                 timestep=timestep0,
-                kv_cache=self.kv_cache_pos,
                 crossattn_cache=self.crossattn_cache_pos,
                 current_start=current_start_frame * self.frame_seq_length,
                 cache_start=cache_start_frame * self.frame_seq_length,
+                **self._cache_commit_kwargs(self.kv_cache_pos),
             )
             self.generator.commit_kv_cache(
                 noisy_image_or_video=latents,
                 conditional_dict=unconditional_dict,
                 timestep=timestep0,
-                kv_cache=self.kv_cache_neg,
                 crossattn_cache=self.crossattn_cache_neg,
                 current_start=current_start_frame * self.frame_seq_length,
                 cache_start=cache_start_frame * self.frame_seq_length,
+                **self._cache_commit_kwargs(self.kv_cache_neg),
             )
 
             
@@ -526,19 +526,19 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
                     noisy_image_or_video=current_ref_latents,
                     conditional_dict=conditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache_pos,
                     crossattn_cache=self.crossattn_cache_pos,
                     current_start=current_start_frame * self.frame_seq_length,
                     cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_commit_kwargs(self.kv_cache_pos),
                 )
                 self.generator.commit_kv_cache(
                     noisy_image_or_video=current_ref_latents,
                     conditional_dict=unconditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache_neg,
                     crossattn_cache=self.crossattn_cache_neg,
                     current_start=current_start_frame * self.frame_seq_length,
                     cache_start=cache_start_frame * self.frame_seq_length,
+                    **self._cache_commit_kwargs(self.kv_cache_neg),
                 )
                 current_start_frame += chunksize
                 cache_start_frame += chunksize
@@ -555,19 +555,19 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
             noisy_image_or_video=latent_model_input,
             conditional_dict=conditional_dict,
             timestep=timestep,
-            kv_cache=self.kv_cache_pos,
             crossattn_cache=self.crossattn_cache_pos,
             current_start=current_start_frame * self.frame_seq_length,
-            cache_start=cache_start_frame * self.frame_seq_length
+            cache_start=cache_start_frame * self.frame_seq_length,
+            **self._cache_forward_kwargs(self.kv_cache_pos),
         )
         flow_pred_uncond, _ = self.generator(
             noisy_image_or_video=latent_model_input,
             conditional_dict=unconditional_dict,
             timestep=timestep,
-            kv_cache=self.kv_cache_neg,
             crossattn_cache=self.crossattn_cache_neg,
             current_start=current_start_frame * self.frame_seq_length,
-            cache_start=cache_start_frame * self.frame_seq_length
+            cache_start=cache_start_frame * self.frame_seq_length,
+            **self._cache_forward_kwargs(self.kv_cache_neg),
         )
         flow_pred = flow_pred_uncond + self.args.guidance_scale * (
             flow_pred_cond - flow_pred_uncond)
@@ -586,6 +586,24 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         """
         Initialize a Per-GPU KV cache for the Wan model.
         """
+        if self.generator.uses_structured_kv_cache():
+            self.kv_cache_pos = self.generator.build_pack_cache_handle(
+                batch_size=batch_size,
+                dtype=dtype,
+                device=device,
+                num_transformer_blocks=self.num_transformer_blocks,
+                frame_seq_length=self.frame_seq_length,
+                cache_mode="finalized_chunk_only",
+            )
+            self.kv_cache_neg = self.generator.build_pack_cache_handle(
+                batch_size=batch_size,
+                dtype=dtype,
+                device=device,
+                num_transformer_blocks=self.num_transformer_blocks,
+                frame_seq_length=self.frame_seq_length,
+                cache_mode="finalized_chunk_only",
+            )
+            return
         self.kv_cache_pos = self.generator.build_kv_cache(
             batch_size=batch_size,
             dtype=dtype,
@@ -604,6 +622,10 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
         )
 
     def _reset_kv_cache(self, device):
+        if self.generator.uses_structured_kv_cache():
+            self.generator.reset_pack_cache_handle(self.kv_cache_pos, device=device)
+            self.generator.reset_pack_cache_handle(self.kv_cache_neg, device=device)
+            return
         self.generator.reset_kv_cache(self.kv_cache_pos, device=device)
         self.generator.reset_kv_cache(self.kv_cache_neg, device=device)
 
@@ -627,6 +649,16 @@ class CausalDiffusionInferencePipeline(torch.nn.Module):
 
         self.crossattn_cache_pos = crossattn_cache_pos  # always store the clean cache
         self.crossattn_cache_neg = crossattn_cache_neg  # always store the clean cache
+
+    def _cache_forward_kwargs(self, cache):
+        if self.generator.uses_structured_kv_cache():
+            return {"pack_cache_handle": cache}
+        return {"kv_cache": cache}
+
+    def _cache_commit_kwargs(self, cache):
+        if self.generator.uses_structured_kv_cache():
+            return {"pack_cache_handle": cache}
+        return {"kv_cache": cache}
 
     def _initialize_sample_scheduler(self, noise, sampling_steps=-1):
         if sampling_steps == -1:

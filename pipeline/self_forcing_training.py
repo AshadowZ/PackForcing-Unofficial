@@ -109,7 +109,7 @@ class SelfForcingTrainingPipeline:
                     noisy_image_or_video=initial_latent,
                     conditional_dict=conditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache1,
+                    **self._cache_forward_kwargs(self.kv_cache1),
                     crossattn_cache=self.crossattn_cache,
                     current_start=current_start_frame * self.frame_seq_length
                 )
@@ -155,7 +155,7 @@ class SelfForcingTrainingPipeline:
                                 noisy_image_or_video=noisy_input,
                                 conditional_dict=conditional_dict,
                                 timestep=timestep,
-                                kv_cache=self.kv_cache1,
+                                **self._cache_forward_kwargs(self.kv_cache1),
                                 crossattn_cache=self.crossattn_cache,
                                 current_start=current_start_frame * self.frame_seq_length
                             )
@@ -175,7 +175,7 @@ class SelfForcingTrainingPipeline:
                                     noisy_image_or_video=noisy_input,
                                     conditional_dict=conditional_dict,
                                     timestep=timestep,
-                                    kv_cache=self.kv_cache1,
+                                    **self._cache_forward_kwargs(self.kv_cache1),
                                     crossattn_cache=self.crossattn_cache,
                                     current_start=current_start_frame * self.frame_seq_length
                                 )
@@ -184,7 +184,7 @@ class SelfForcingTrainingPipeline:
                                 noisy_image_or_video=noisy_input,
                                 conditional_dict=conditional_dict,
                                 timestep=timestep,
-                                kv_cache=self.kv_cache1,
+                                **self._cache_forward_kwargs(self.kv_cache1),
                                 crossattn_cache=self.crossattn_cache,
                                 current_start=current_start_frame * self.frame_seq_length
                             )
@@ -210,7 +210,7 @@ class SelfForcingTrainingPipeline:
                         noisy_image_or_video=denoised_pred,
                         conditional_dict=conditional_dict,
                         timestep=context_timestep,
-                        kv_cache=self.kv_cache1,
+                        **self._cache_forward_kwargs(self.kv_cache1),
                         crossattn_cache=self.crossattn_cache,
                         current_start=current_start_frame * self.frame_seq_length
                     )
@@ -247,6 +247,16 @@ class SelfForcingTrainingPipeline:
         Initialize a Per-GPU KV cache for the Wan model.
         """
         generator = self._get_cache_api_generator()
+        if generator.uses_structured_kv_cache():
+            self.kv_cache1 = generator.build_pack_cache_handle(
+                batch_size=batch_size,
+                dtype=dtype,
+                device=device,
+                num_transformer_blocks=self.num_transformer_blocks,
+                frame_seq_length=self.frame_seq_length,
+                cache_mode="rollout_compatible",
+            )
+            return
         self.kv_cache1 = generator.build_kv_cache(
             batch_size=batch_size,
             dtype=dtype,
@@ -258,6 +268,9 @@ class SelfForcingTrainingPipeline:
 
     def _reset_kv_cache(self, device):
         generator = self._get_cache_api_generator()
+        if generator.uses_structured_kv_cache():
+            generator.reset_pack_cache_handle(self.kv_cache1, device=device)
+            return
         generator.reset_kv_cache(self.kv_cache1, device=device)
 
     def _initialize_crossattn_cache(self, batch_size, dtype, device):
@@ -279,3 +292,9 @@ class SelfForcingTrainingPipeline:
         if hasattr(generator, "module"):
             return generator.module
         return generator
+
+    def _cache_forward_kwargs(self, cache):
+        generator = self._get_cache_api_generator()
+        if generator.uses_structured_kv_cache():
+            return {"pack_cache_handle": cache}
+        return {"kv_cache": cache}

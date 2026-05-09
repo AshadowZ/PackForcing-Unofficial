@@ -26,6 +26,18 @@ def validate_pack_cache_mode(mode: str | None) -> str:
     return mode
 
 
+def should_update_pack_cache(
+    *,
+    grad_enabled: bool,
+    cache_mode: str | None,
+    pack_cache_commit: bool,
+) -> bool:
+    mode = validate_pack_cache_mode(cache_mode)
+    return (not grad_enabled) and (
+        mode == PACK_CACHE_MODE_ROLLOUT_COMPATIBLE or pack_cache_commit
+    )
+
+
 @dataclass(frozen=True)
 class PackCacheHandle:
     """Opaque handle for one model-internal PackForcing cache session."""
@@ -119,15 +131,57 @@ class SourceLatentBlock:
 
 
 @dataclass
-class PackSourceCacheState:
-    """Shared latent-space history used for train-time mid recomputation."""
+class PackBlockRegistry:
+    """Canonical block ordering and metadata shared across all PackForcing views."""
 
-    recent_blocks: deque[SourceLatentBlock] = field(default_factory=deque)
-    mid_blocks: deque[SourceLatentBlock] = field(default_factory=deque)
+    sink_block_ids: list[int] = field(default_factory=list)
+    recent_block_ids: deque[int] = field(default_factory=deque)
+    mid_block_ids: deque[int] = field(default_factory=deque)
+    block_meta_by_id: dict[int, BlockMeta] = field(default_factory=dict)
     next_block_id: int = 0
     total_committed_blocks: int = 0
     batch_size: int | None = None
     last_block_start_frame: int | None = None
+
+
+@dataclass
+class PackSourceCacheState:
+    """Shared latent-space history used for train-time mid recomputation."""
+
+    registry: PackBlockRegistry = field(default_factory=PackBlockRegistry)
+    latent_blocks_by_id: dict[int, SourceLatentBlock] = field(default_factory=dict)
+
+    @property
+    def recent_blocks(self) -> deque[SourceLatentBlock]:
+        return deque(
+            self.latent_blocks_by_id[block_id]
+            for block_id in self.registry.recent_block_ids
+            if block_id in self.latent_blocks_by_id
+        )
+
+    @property
+    def mid_blocks(self) -> deque[SourceLatentBlock]:
+        return deque(
+            self.latent_blocks_by_id[block_id]
+            for block_id in self.registry.mid_block_ids
+            if block_id in self.latent_blocks_by_id
+        )
+
+    @property
+    def next_block_id(self) -> int:
+        return self.registry.next_block_id
+
+    @property
+    def total_committed_blocks(self) -> int:
+        return self.registry.total_committed_blocks
+
+    @property
+    def batch_size(self) -> int | None:
+        return self.registry.batch_size
+
+    @property
+    def last_block_start_frame(self) -> int | None:
+        return self.registry.last_block_start_frame
 
 
 @dataclass
@@ -148,14 +202,47 @@ class PackLayerCacheState:
     """Per-transformer-layer PackForcing cache state."""
 
     cfg: PackCacheConfig
-    sink_blocks: list[FullResKVBlock] = field(default_factory=list)
-    recent_blocks: deque[FullResKVBlock] = field(default_factory=deque)
-    mid_blocks: deque[CompressedKVBlock] = field(default_factory=deque)
-    next_block_id: int = 0
-    total_committed_blocks: int = 0
-    batch_size: int | None = None
+    registry: PackBlockRegistry
+    fullres_blocks_by_id: dict[int, FullResKVBlock] = field(default_factory=dict)
+    mid_blocks_by_id: dict[int, CompressedKVBlock] = field(default_factory=dict)
     cached_selected_mid_indices: torch.Tensor | None = None
     cached_selection_for_start_frame: int | None = None
+
+    @property
+    def sink_blocks(self) -> list[FullResKVBlock]:
+        return [
+            self.fullres_blocks_by_id[block_id]
+            for block_id in self.registry.sink_block_ids
+            if block_id in self.fullres_blocks_by_id
+        ]
+
+    @property
+    def recent_blocks(self) -> deque[FullResKVBlock]:
+        return deque(
+            self.fullres_blocks_by_id[block_id]
+            for block_id in self.registry.recent_block_ids
+            if block_id in self.fullres_blocks_by_id
+        )
+
+    @property
+    def mid_blocks(self) -> deque[CompressedKVBlock]:
+        return deque(
+            self.mid_blocks_by_id[block_id]
+            for block_id in self.registry.mid_block_ids
+            if block_id in self.mid_blocks_by_id
+        )
+
+    @property
+    def next_block_id(self) -> int:
+        return self.registry.next_block_id
+
+    @property
+    def total_committed_blocks(self) -> int:
+        return self.registry.total_committed_blocks
+
+    @property
+    def batch_size(self) -> int | None:
+        return self.registry.batch_size
 
 
 class PackBlockCompressor(Protocol):
@@ -204,18 +291,28 @@ class IdentityCompressor:
         return CompressedKVBlock(k=block.k.clone(), v=block.v.clone(), meta=meta)
 
 
-def init_empty_pack_layer_cache(cfg: PackCacheConfig) -> PackLayerCacheState:
-    return PackLayerCacheState(cfg=cfg)
+def init_empty_pack_layer_cache(
+    cfg: PackCacheConfig,
+    registry: PackBlockRegistry,
+) -> PackLayerCacheState:
+    return PackLayerCacheState(cfg=cfg, registry=registry)
 
 
 def reset_pack_layer_cache(state: PackLayerCacheState) -> None:
-    state.sink_blocks.clear()
-    state.recent_blocks.clear()
-    state.mid_blocks.clear()
-    state.next_block_id = 0
-    state.total_committed_blocks = 0
-    state.batch_size = None
+    state.fullres_blocks_by_id.clear()
+    state.mid_blocks_by_id.clear()
     _invalidate_mid_selection_cache(state)
+
+
+def reset_pack_block_registry(registry: PackBlockRegistry) -> None:
+    registry.sink_block_ids.clear()
+    registry.recent_block_ids.clear()
+    registry.mid_block_ids.clear()
+    registry.block_meta_by_id.clear()
+    registry.next_block_id = 0
+    registry.total_committed_blocks = 0
+    registry.batch_size = None
+    registry.last_block_start_frame = None
 
 
 def commit_fullres_block(
@@ -229,8 +326,8 @@ def commit_fullres_block(
     """Commit a generated block into sink/recent/mid history."""
 
     _validate_kv_tensor_pair(k, v)
-    _maybe_set_batch_size(state, k.shape[0])
-    block = _build_fullres_block(
+    _maybe_set_batch_size(state.registry, k.shape[0])
+    block, is_new_registry_block = _build_fullres_block(
         state=state,
         k=k,
         v=v,
@@ -240,26 +337,34 @@ def commit_fullres_block(
         precomputed_mid = _normalize_precomputed_mid_block(block, precomputed_mid)
         block = FullResKVBlock(k=block.k, v=block.v, meta=block.meta, precomputed_mid=precomputed_mid)
 
-    if len(state.sink_blocks) < state.cfg.sink_blocks:
-        state.sink_blocks.append(block)
-    else:
-        state.recent_blocks.append(block)
-        while len(state.recent_blocks) > state.cfg.recent_blocks:
-            oldest_recent = state.recent_blocks.popleft()
-            if oldest_recent.precomputed_mid is not None:
-                compressed = oldest_recent.precomputed_mid
-            else:
-                if state.cfg.compress_mode == "hr_spatial":
-                    raise RuntimeError(
-                        "PackForcing hr_spatial compression expected a precomputed mid block, "
-                        "but the recent block did not carry one."
-                    )
-                compressed = compressor(oldest_recent)
-            _validate_compressed_block(oldest_recent, compressed)
-            state.mid_blocks.append(compressed)
-            _evict_mid_blocks_if_needed(state)
+    block_id = block.meta.block_id
+    state.fullres_blocks_by_id[block_id] = block
 
-    state.total_committed_blocks += 1
+    if is_new_registry_block:
+        if len(state.registry.sink_block_ids) < state.cfg.sink_blocks:
+            state.registry.sink_block_ids.append(block_id)
+        else:
+            state.registry.recent_block_ids.append(block_id)
+            while len(state.registry.recent_block_ids) > state.cfg.recent_blocks:
+                oldest_recent_id = state.registry.recent_block_ids.popleft()
+                oldest_recent = state.fullres_blocks_by_id.pop(oldest_recent_id)
+                if oldest_recent.precomputed_mid is not None:
+                    compressed = oldest_recent.precomputed_mid
+                else:
+                    if state.cfg.compress_mode == "hr_spatial":
+                        raise RuntimeError(
+                            "PackForcing hr_spatial compression expected a precomputed mid block, "
+                            "but the recent block did not carry one."
+                        )
+                    compressed = compressor(oldest_recent)
+                _validate_compressed_block(oldest_recent, compressed)
+                state.mid_blocks_by_id[oldest_recent_id] = compressed
+                state.registry.mid_block_ids.append(oldest_recent_id)
+                _evict_mid_blocks_if_needed(state)
+
+        state.registry.total_committed_blocks += 1
+
+    _reconcile_layer_storage_with_registry(state, compressor)
     _invalidate_mid_selection_cache(state)
 
 
@@ -275,7 +380,7 @@ def select_mid_blocks(
 
     mid_blocks = list(state.mid_blocks)
     num_mid_blocks = len(mid_blocks)
-    batch_size = state.batch_size or block_scores.shape[0]
+    batch_size = state.registry.batch_size or block_scores.shape[0]
 
     if num_mid_blocks == 0:
         return torch.zeros((batch_size, 0), dtype=torch.long, device=block_scores.device)
@@ -333,10 +438,10 @@ def build_attention_view(
 ) -> PackAttentionView:
     """Build the packed history view used by one attention call."""
 
-    if state.batch_size is None:
+    if state.registry.batch_size is None:
         raise ValueError("Cannot build an attention view from an uninitialized cache.")
 
-    batch_size = state.batch_size
+    batch_size = state.registry.batch_size
     reference = _find_reference_tensor(state)
     sink_k, sink_v = _cat_blocks([block.k for block in state.sink_blocks], [block.v for block in state.sink_blocks], reference)
     recent_k, recent_v = _cat_blocks(
@@ -399,7 +504,7 @@ def get_pack_cache_stats(state: PackLayerCacheState) -> dict:
         "recent_tokens": recent_tokens,
         "mid_bank_capacity_blocks": state.cfg.mid_bank_capacity_blocks,
         "mid_select_topk_blocks": state.cfg.mid_select_topk_blocks,
-        "total_committed_blocks": state.total_committed_blocks,
+        "total_committed_blocks": state.registry.total_committed_blocks,
     }
 
 
@@ -423,7 +528,7 @@ def _build_fullres_block(
     k: torch.Tensor,
     v: torch.Tensor,
     start_frame: int,
-) -> FullResKVBlock:
+) -> tuple[FullResKVBlock, bool]:
     cfg = state.cfg
     num_tokens = k.shape[1]
     if num_tokens % cfg.frame_seq_len != 0:
@@ -431,8 +536,20 @@ def _build_fullres_block(
             f"Expected token count divisible by frame_seq_len={cfg.frame_seq_len}, got {num_tokens}."
         )
     num_frames = num_tokens // cfg.frame_seq_len
+    tail_block_id = None
+    if state.registry.last_block_start_frame == start_frame:
+        tail_block_id = _get_tail_block_id(state.registry)
+    if tail_block_id is not None:
+        meta = state.registry.block_meta_by_id[tail_block_id]
+        if meta.num_frames != num_frames or meta.num_tokens != num_tokens or meta.tokens_per_frame != cfg.frame_seq_len:
+            raise RuntimeError(
+                "PackForcing shared block registry metadata mismatch while reusing block id "
+                f"{tail_block_id} at start_frame={start_frame}."
+            )
+        return FullResKVBlock(k=k, v=v, meta=meta), False
+
     meta = BlockMeta(
-        block_id=state.next_block_id,
+        block_id=state.registry.next_block_id,
         start_frame=start_frame,
         num_frames=num_frames,
         packed_frame_span=num_frames,
@@ -441,8 +558,10 @@ def _build_fullres_block(
         is_compressed=False,
         source_block_id=None,
     )
-    state.next_block_id += 1
-    return FullResKVBlock(k=k, v=v, meta=meta)
+    state.registry.next_block_id += 1
+    state.registry.block_meta_by_id[meta.block_id] = meta
+    state.registry.last_block_start_frame = start_frame
+    return FullResKVBlock(k=k, v=v, meta=meta), True
 
 
 def _normalize_precomputed_mid_block(
@@ -481,8 +600,52 @@ def _normalize_precomputed_mid_block(
 def _evict_mid_blocks_if_needed(state: PackLayerCacheState) -> None:
     if state.cfg.evict_mode != "fifo":
         raise ValueError(f"Unsupported evict_mode={state.cfg.evict_mode}.")
-    while len(state.mid_blocks) > state.cfg.mid_bank_capacity_blocks:
-        state.mid_blocks.popleft()
+    while len(state.registry.mid_block_ids) > state.cfg.mid_bank_capacity_blocks:
+        evicted_block_id = state.registry.mid_block_ids.popleft()
+        state.mid_blocks_by_id.pop(evicted_block_id, None)
+
+
+def _reconcile_layer_storage_with_registry(
+    state: PackLayerCacheState,
+    compressor: PackBlockCompressor,
+) -> None:
+    live_fullres_ids = set(state.registry.sink_block_ids) | set(state.registry.recent_block_ids)
+    live_mid_ids = set(state.registry.mid_block_ids)
+
+    for block_id in list(state.mid_blocks_by_id.keys()):
+        if block_id not in live_mid_ids:
+            state.mid_blocks_by_id.pop(block_id, None)
+
+    for block_id in list(state.fullres_blocks_by_id.keys()):
+        if block_id in live_fullres_ids:
+            continue
+
+        fullres_block = state.fullres_blocks_by_id.pop(block_id)
+        if block_id not in live_mid_ids:
+            continue
+
+        if fullres_block.precomputed_mid is not None:
+            compressed = fullres_block.precomputed_mid
+        else:
+            if state.cfg.compress_mode == "hr_spatial":
+                raise RuntimeError(
+                    "PackForcing hr_spatial compression expected a precomputed mid block, "
+                    "but the reconciled recent block did not carry one."
+                )
+            compressed = compressor(fullres_block)
+        _validate_compressed_block(fullres_block, compressed)
+        state.mid_blocks_by_id[block_id] = compressed
+
+    missing_mid_ids = [
+        block_id
+        for block_id in state.registry.mid_block_ids
+        if block_id not in state.mid_blocks_by_id
+    ]
+    if missing_mid_ids:
+        raise RuntimeError(
+            "PackForcing layer cache is missing compressed mid blocks after registry reconciliation: "
+            f"{missing_mid_ids}."
+        )
 
 
 def _default_mid_selection(
@@ -578,6 +741,14 @@ def _find_reference_tensor(state: PackLayerCacheState) -> torch.Tensor:
     raise ValueError("Pack cache has no tensors yet.")
 
 
+def _get_tail_block_id(registry: PackBlockRegistry) -> int | None:
+    if registry.recent_block_ids:
+        return registry.recent_block_ids[-1]
+    if registry.sink_block_ids:
+        return registry.sink_block_ids[-1]
+    return None
+
+
 def _validate_kv_tensor_pair(k: torch.Tensor, v: torch.Tensor) -> None:
     if k.shape != v.shape:
         raise ValueError(f"k and v must share the same shape, got {tuple(k.shape)} vs {tuple(v.shape)}.")
@@ -600,11 +771,13 @@ def _validate_compressed_block(
         raise ValueError("Compressed block meta must set is_compressed=True.")
 
 
-def _maybe_set_batch_size(state: PackLayerCacheState, batch_size: int) -> None:
-    if state.batch_size is None:
-        state.batch_size = batch_size
-    elif state.batch_size != batch_size:
-        raise ValueError(f"Pack cache batch size mismatch: expected {state.batch_size}, got {batch_size}.")
+def _maybe_set_batch_size(registry: PackBlockRegistry, batch_size: int) -> None:
+    if registry.batch_size is None:
+        registry.batch_size = batch_size
+    elif registry.batch_size != batch_size:
+        raise ValueError(
+            f"Pack cache batch size mismatch: expected {registry.batch_size}, got {batch_size}."
+        )
 
 
 def _invalidate_mid_selection_cache(state: PackLayerCacheState) -> None:

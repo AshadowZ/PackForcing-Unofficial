@@ -128,7 +128,10 @@ class CausalInferencePipeline(torch.nn.Module):
             for block_index in range(self.num_transformer_blocks):
                 self.crossattn_cache[block_index]["is_init"] = False
             # reset kv cache
-            self.generator.reset_kv_cache(self.kv_cache1, device=noise.device)
+            if self.generator.uses_structured_kv_cache():
+                self.generator.reset_pack_cache_handle(self.kv_cache1, device=noise.device)
+            else:
+                self.generator.reset_kv_cache(self.kv_cache1, device=noise.device)
 
         # Step 2: Cache context feature
         current_start_frame = 0
@@ -143,9 +146,9 @@ class CausalInferencePipeline(torch.nn.Module):
                     noisy_image_or_video=initial_latent[:, :1],
                     conditional_dict=conditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache1,
                     crossattn_cache=self.crossattn_cache,
                     current_start=current_start_frame * self.frame_seq_length,
+                    **self._cache_commit_kwargs(self.kv_cache1),
                 )
                 current_start_frame += 1
             else:
@@ -161,9 +164,9 @@ class CausalInferencePipeline(torch.nn.Module):
                     noisy_image_or_video=current_ref_latents,
                     conditional_dict=conditional_dict,
                     timestep=timestep * 0,
-                    kv_cache=self.kv_cache1,
                     crossattn_cache=self.crossattn_cache,
                     current_start=current_start_frame * self.frame_seq_length,
+                    **self._cache_commit_kwargs(self.kv_cache1),
                 )
                 current_start_frame += self.num_frame_per_block
 
@@ -197,9 +200,9 @@ class CausalInferencePipeline(torch.nn.Module):
                         noisy_image_or_video=noisy_input,
                         conditional_dict=conditional_dict,
                         timestep=timestep,
-                        kv_cache=self.kv_cache1,
                         crossattn_cache=self.crossattn_cache,
-                        current_start=current_start_frame * self.frame_seq_length
+                        current_start=current_start_frame * self.frame_seq_length,
+                        **self._cache_forward_kwargs(self.kv_cache1),
                     )
                     next_timestep = self.denoising_step_list[index + 1]
                     noisy_input = self.scheduler.add_noise(
@@ -214,9 +217,9 @@ class CausalInferencePipeline(torch.nn.Module):
                         noisy_image_or_video=noisy_input,
                         conditional_dict=conditional_dict,
                         timestep=timestep,
-                        kv_cache=self.kv_cache1,
                         crossattn_cache=self.crossattn_cache,
-                        current_start=current_start_frame * self.frame_seq_length
+                        current_start=current_start_frame * self.frame_seq_length,
+                        **self._cache_forward_kwargs(self.kv_cache1),
                     )
 
             # Step 3.2: record the model's output
@@ -229,9 +232,9 @@ class CausalInferencePipeline(torch.nn.Module):
                 noisy_image_or_video=denoised_pred,
                 conditional_dict=conditional_dict,
                 timestep=context_timestep,
-                kv_cache=self.kv_cache1,
                 crossattn_cache=self.crossattn_cache,
                 current_start=current_start_frame * self.frame_seq_length,
+                **self._cache_commit_kwargs(self.kv_cache1),
             )
 
             if profile:
@@ -283,6 +286,16 @@ class CausalInferencePipeline(torch.nn.Module):
         """
         Initialize a Per-GPU KV cache for the Wan model.
         """
+        if self.generator.uses_structured_kv_cache():
+            self.kv_cache1 = self.generator.build_pack_cache_handle(
+                batch_size=batch_size,
+                dtype=dtype,
+                device=device,
+                num_transformer_blocks=self.num_transformer_blocks,
+                frame_seq_length=self.frame_seq_length,
+                cache_mode="finalized_chunk_only",
+            )
+            return
         self.kv_cache1 = self.generator.build_kv_cache(
             batch_size=batch_size,
             dtype=dtype,
@@ -291,6 +304,16 @@ class CausalInferencePipeline(torch.nn.Module):
             frame_seq_length=self.frame_seq_length,
             cache_mode="finalized_chunk_only",
         )
+
+    def _cache_forward_kwargs(self, cache):
+        if self.generator.uses_structured_kv_cache():
+            return {"pack_cache_handle": cache}
+        return {"kv_cache": cache}
+
+    def _cache_commit_kwargs(self, cache):
+        if self.generator.uses_structured_kv_cache():
+            return {"pack_cache_handle": cache}
+        return {"kv_cache": cache}
 
     def _initialize_crossattn_cache(self, batch_size, dtype, device):
         """

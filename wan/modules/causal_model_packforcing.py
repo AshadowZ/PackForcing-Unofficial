@@ -22,6 +22,7 @@ from wan.modules.pack_cache import (
     FullResKVBlock,
     IdentityCompressor,
     PackBlockCompressor,
+    PackBlockRegistry,
     PackCacheHandle,
     PackCacheConfig,
     PackLayerCacheState,
@@ -34,7 +35,9 @@ from wan.modules.pack_cache import (
     init_empty_pack_layer_cache,
     maybe_reuse_or_select_mid_blocks,
     reset_pack_layer_cache,
+    reset_pack_block_registry,
     select_mid_blocks,
+    should_update_pack_cache,
     validate_pack_cache_mode,
     _normalize_precomputed_mid_block,
 )
@@ -89,6 +92,7 @@ class PackConfig:
 @dataclass
 class _PackCacheSession:
     mode: str
+    registry: PackBlockRegistry
     layer_cache: list[PackLayerCacheState]
     source_state: PackSourceCacheState
 
@@ -96,8 +100,9 @@ class _PackCacheSession:
 def init_pack_kv_cache(
     num_layers: int,
     pack_cfg: PackCacheConfig,
+    registry: PackBlockRegistry,
 ) -> list[PackLayerCacheState]:
-    return [init_empty_pack_layer_cache(pack_cfg) for _ in range(num_layers)]
+    return [init_empty_pack_layer_cache(pack_cfg, registry=registry) for _ in range(num_layers)]
 
 
 class CausalWanSelfAttentionPackForcing(CausalWanSelfAttention):
@@ -650,11 +655,17 @@ class CausalWanModelPackForcing(CausalWanModel):
         self.init_weights()
 
     def make_pack_kv_cache(self) -> list[PackLayerCacheState]:
+        return self.make_pack_kv_cache_with_registry(PackBlockRegistry())
+
+    def make_pack_kv_cache_with_registry(
+        self,
+        registry: PackBlockRegistry,
+    ) -> list[PackLayerCacheState]:
         pack_cache_cfg = self.pack_cfg.build_cache_config(
             frame_seq_len=1560,
             num_frame_per_block=self.num_frame_per_block,
         )
-        return init_pack_kv_cache(self.num_layers, pack_cache_cfg)
+        return init_pack_kv_cache(self.num_layers, pack_cache_cfg, registry=registry)
 
     def _reset_pack_layer_cache_state(self, layer_cache: list[PackLayerCacheState]) -> None:
         for cache_state in layer_cache:
@@ -662,21 +673,23 @@ class CausalWanModelPackForcing(CausalWanModel):
             reset_pack_layer_cache(cache_state)
 
     def _reset_pack_source_cache_state(self, source_state: PackSourceCacheState) -> None:
-        source_state.recent_blocks.clear()
-        source_state.mid_blocks.clear()
-        source_state.next_block_id = 0
-        source_state.total_committed_blocks = 0
-        source_state.batch_size = None
-        source_state.last_block_start_frame = None
+        source_state.latent_blocks_by_id.clear()
+
+    def _reset_pack_cache_session_state(self, session: _PackCacheSession) -> None:
+        self._reset_pack_layer_cache_state(session.layer_cache)
+        self._reset_pack_source_cache_state(session.source_state)
+        reset_pack_block_registry(session.registry)
 
     def create_pack_cache_handle(self, cache_mode: str | None = None) -> PackCacheHandle:
         mode = validate_pack_cache_mode(cache_mode)
         session_id = self._next_pack_cache_session_id
         self._next_pack_cache_session_id += 1
+        registry = PackBlockRegistry()
         self._pack_cache_sessions[session_id] = _PackCacheSession(
             mode=mode,
-            layer_cache=self.make_pack_kv_cache(),
-            source_state=PackSourceCacheState(),
+            registry=registry,
+            layer_cache=self.make_pack_kv_cache_with_registry(registry),
+            source_state=PackSourceCacheState(registry=registry),
         )
         return PackCacheHandle(session_id=session_id, mode=mode)
 
@@ -700,19 +713,18 @@ class CausalWanModelPackForcing(CausalWanModel):
 
     def reset_pack_cache_session(self, handle: PackCacheHandle) -> None:
         session = self._require_pack_cache_session(handle.session_id, handle.mode)
-        self._reset_pack_layer_cache_state(session.layer_cache)
-        self._reset_pack_source_cache_state(session.source_state)
+        self._reset_pack_cache_session_state(session)
 
     def get_pack_layer_cache(self, handle: PackCacheHandle) -> list[PackLayerCacheState]:
         return self._require_pack_cache_session(handle.session_id, handle.mode).layer_cache
 
     def reset_pack_layer_cache(self, handle: PackCacheHandle) -> None:
         session = self._require_pack_cache_session(handle.session_id, handle.mode)
-        self._reset_pack_layer_cache_state(session.layer_cache)
+        self._reset_pack_cache_session_state(session)
 
     def reset_pack_source_cache(self, handle: PackCacheHandle) -> None:
         session = self._require_pack_cache_session(handle.session_id, handle.mode)
-        self._reset_pack_source_cache_state(session.source_state)
+        self._reset_pack_cache_session_state(session)
 
     def _gather_history_mid_source_blocks(
         self,
@@ -811,51 +823,61 @@ class CausalWanModelPackForcing(CausalWanModel):
         source_latent: torch.Tensor,
         start_frame: int,
     ) -> None:
-        state = source_state
         if source_latent.ndim != 5:
             raise ValueError(
                 "PackForcing source latent blocks must have shape [B, C, T, H, W], "
                 f"got {tuple(source_latent.shape)}."
             )
         batch_size, _, num_frames, _, _ = source_latent.shape
-        if state.batch_size is None:
-            state.batch_size = batch_size
-        elif state.batch_size != batch_size:
+        registry = source_state.registry
+        if registry.batch_size is None:
+            registry.batch_size = batch_size
+        elif registry.batch_size != batch_size:
             raise ValueError(
-                f"PackForcing source bank batch size mismatch: expected {state.batch_size}, got {batch_size}."
+                f"PackForcing source bank batch size mismatch: expected {registry.batch_size}, got {batch_size}."
             )
 
-        if state.last_block_start_frame == start_frame:
-            if state.recent_blocks and state.recent_blocks[-1].meta.start_frame == start_frame:
-                state.recent_blocks[-1] = SourceLatentBlock(
-                    latent=source_latent,
-                    meta=state.recent_blocks[-1].meta,
-                )
-            return
+        block_id = _get_tail_fullres_block_id_from_registry(registry)
+        if block_id is None:
+            raise RuntimeError(
+                "PackForcing source latent commit expected an existing shared block registry entry."
+            )
+        meta = registry.block_meta_by_id[block_id]
+        if meta.start_frame != start_frame:
+            raise RuntimeError(
+                "PackForcing source latent commit start_frame mismatch: "
+                f"registry tail starts at {meta.start_frame}, got {start_frame}."
+            )
+        if meta.num_frames != num_frames:
+            raise RuntimeError(
+                "PackForcing source latent commit num_frames mismatch: "
+                f"registry tail has {meta.num_frames}, got {num_frames}."
+            )
 
-        block_id = state.next_block_id
-        meta = BlockMeta(
-            block_id=block_id,
-            start_frame=start_frame,
-            num_frames=num_frames,
-            packed_frame_span=num_frames,
-            tokens_per_frame=1,
-            num_tokens=num_frames,
-            is_compressed=False,
-            source_block_id=None,
-        )
-        state.next_block_id += 1
-        state.total_committed_blocks += 1
-        state.last_block_start_frame = start_frame
+        if (
+            block_id in registry.recent_block_ids
+            or block_id in registry.mid_block_ids
+        ):
+            source_state.latent_blocks_by_id[block_id] = SourceLatentBlock(
+                latent=source_latent,
+                meta=meta,
+            )
+        else:
+            source_state.latent_blocks_by_id.pop(block_id, None)
 
-        if block_id < self.pack_cfg.sink_blocks:
-            return
+        live_latent_block_ids = set(registry.recent_block_ids) | set(registry.mid_block_ids)
+        stale_block_ids = [
+            candidate_block_id
+            for candidate_block_id in list(source_state.latent_blocks_by_id.keys())
+            if candidate_block_id not in live_latent_block_ids
+        ]
+        for stale_block_id in stale_block_ids:
+            source_state.latent_blocks_by_id.pop(stale_block_id, None)
 
-        state.recent_blocks.append(SourceLatentBlock(latent=source_latent, meta=meta))
-        while len(state.recent_blocks) > self.pack_cfg.recent_blocks:
-            state.mid_blocks.append(state.recent_blocks.popleft())
-            while len(state.mid_blocks) > self.pack_cfg.mid_bank_capacity_blocks:
-                state.mid_blocks.popleft()
+        if registry.last_block_start_frame != start_frame:
+            raise RuntimeError(
+                "PackForcing source latent commit observed registry drift after reconciliation."
+            )
 
     def _forward_inference(
         self,
@@ -888,9 +910,10 @@ class CausalWanModelPackForcing(CausalWanModel):
         )
         kv_cache = session.layer_cache
         source_state = session.source_state
-        should_update_cache = (
-            not torch.is_grad_enabled()
-            and (session.mode == "rollout_compatible" or pack_cache_commit)
+        should_update_cache = should_update_pack_cache(
+            grad_enabled=torch.is_grad_enabled(),
+            cache_mode=session.mode,
+            pack_cache_commit=pack_cache_commit,
         )
         if pack_cache_only and not should_update_cache:
             raise RuntimeError(
@@ -1126,10 +1149,7 @@ def _upsert_pack_cache_block(
             meta=tail.meta,
             precomputed_mid=updated_precomputed_mid,
         )
-        if state.recent_blocks:
-            state.recent_blocks[-1] = updated
-        else:
-            state.sink_blocks[-1] = updated
+        state.fullres_blocks_by_id[tail.meta.block_id] = updated
         state.cached_selected_mid_indices = None
         state.cached_selection_for_start_frame = None
         return
@@ -1145,10 +1165,19 @@ def _upsert_pack_cache_block(
 
 
 def _get_tail_fullres_block(state: PackLayerCacheState) -> FullResKVBlock | None:
-    if state.recent_blocks:
-        return state.recent_blocks[-1]
-    if state.sink_blocks:
-        return state.sink_blocks[-1]
+    tail_block_id = _get_tail_fullres_block_id_from_registry(state.registry)
+    if tail_block_id is None:
+        return None
+    return state.fullres_blocks_by_id.get(tail_block_id)
+
+
+def _get_tail_fullres_block_id_from_registry(
+    registry: PackBlockRegistry,
+) -> int | None:
+    if registry.recent_block_ids:
+        return registry.recent_block_ids[-1]
+    if registry.sink_block_ids:
+        return registry.sink_block_ids[-1]
     return None
 
 
@@ -1159,12 +1188,9 @@ def _snapshot_pack_layer_cache(state: PackLayerCacheState) -> PackLayerCacheStat
 
     return PackLayerCacheState(
         cfg=state.cfg,
-        sink_blocks=list(state.sink_blocks),
-        recent_blocks=deque(state.recent_blocks),
-        mid_blocks=deque(state.mid_blocks),
-        next_block_id=state.next_block_id,
-        total_committed_blocks=state.total_committed_blocks,
-        batch_size=state.batch_size,
+        registry=_copy_pack_block_registry(state.registry),
+        fullres_blocks_by_id=dict(state.fullres_blocks_by_id),
+        mid_blocks_by_id=dict(state.mid_blocks_by_id),
         cached_selected_mid_indices=cached_selected_mid_indices,
         cached_selection_for_start_frame=state.cached_selection_for_start_frame,
     )
@@ -1174,22 +1200,21 @@ def _history_state_without_current_block(
     state: PackLayerCacheState,
     current_start_frame: int,
 ) -> PackLayerCacheState:
-    sink_blocks = list(state.sink_blocks)
-    recent_blocks = list(state.recent_blocks)
-
-    if recent_blocks and recent_blocks[-1].meta.start_frame == current_start_frame:
-        recent_blocks = recent_blocks[:-1]
-    elif sink_blocks and sink_blocks[-1].meta.start_frame == current_start_frame:
-        sink_blocks = sink_blocks[:-1]
+    registry = _copy_pack_block_registry(state.registry)
+    if registry.recent_block_ids:
+        tail_recent_id = registry.recent_block_ids[-1]
+        if registry.block_meta_by_id[tail_recent_id].start_frame == current_start_frame:
+            registry.recent_block_ids.pop()
+    elif registry.sink_block_ids:
+        tail_sink_id = registry.sink_block_ids[-1]
+        if registry.block_meta_by_id[tail_sink_id].start_frame == current_start_frame:
+            registry.sink_block_ids.pop()
 
     return PackLayerCacheState(
         cfg=state.cfg,
-        sink_blocks=sink_blocks,
-        recent_blocks=deque(recent_blocks),
-        mid_blocks=deque(state.mid_blocks),
-        next_block_id=state.next_block_id,
-        total_committed_blocks=state.total_committed_blocks,
-        batch_size=state.batch_size,
+        registry=registry,
+        fullres_blocks_by_id=dict(state.fullres_blocks_by_id),
+        mid_blocks_by_id=dict(state.mid_blocks_by_id),
         cached_selected_mid_indices=None,
         cached_selection_for_start_frame=None,
     )
@@ -1199,16 +1224,29 @@ def _state_with_mid_blocks(
     state: PackLayerCacheState,
     mid_blocks: list[CompressedKVBlock],
 ) -> PackLayerCacheState:
+    mid_blocks_by_id = dict(state.mid_blocks_by_id)
+    for block in mid_blocks:
+        mid_blocks_by_id[block.meta.block_id] = block
     return PackLayerCacheState(
         cfg=state.cfg,
-        sink_blocks=list(state.sink_blocks),
-        recent_blocks=deque(state.recent_blocks),
-        mid_blocks=deque(mid_blocks),
-        next_block_id=state.next_block_id,
-        total_committed_blocks=state.total_committed_blocks,
-        batch_size=state.batch_size,
+        registry=_copy_pack_block_registry(state.registry),
+        fullres_blocks_by_id=dict(state.fullres_blocks_by_id),
+        mid_blocks_by_id=mid_blocks_by_id,
         cached_selected_mid_indices=state.cached_selected_mid_indices,
         cached_selection_for_start_frame=state.cached_selection_for_start_frame,
+    )
+
+
+def _copy_pack_block_registry(registry: PackBlockRegistry) -> PackBlockRegistry:
+    return PackBlockRegistry(
+        sink_block_ids=list(registry.sink_block_ids),
+        recent_block_ids=deque(registry.recent_block_ids),
+        mid_block_ids=deque(registry.mid_block_ids),
+        block_meta_by_id=dict(registry.block_meta_by_id),
+        next_block_id=registry.next_block_id,
+        total_committed_blocks=registry.total_committed_blocks,
+        batch_size=registry.batch_size,
+        last_block_start_frame=registry.last_block_start_frame,
     )
 
 
