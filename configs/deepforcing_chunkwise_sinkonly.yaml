@@ -1,0 +1,14 @@
+generator_ckpt: ckpt/causal_forcing_ckpt/causal_forcing.pt
+denoising_step_list:
+- 1000
+- 750
+- 500
+- 250
+warp_denoising_step: true
+guidance_scale: 3.0
+num_frame_per_block: 3
+model_kwargs:
+  timestep_shift: 5.0
+  local_attn_size: 21
+  sink_size: 12
+data_path: prompts/demos.txt
