@@ -84,13 +84,18 @@ class SelfForcingTrainingPipeline:
             dtype=noise.dtype
         )
 
-        # Step 1: Initialize KV cache to all zeros
-        self._initialize_kv_cache(
-            batch_size=batch_size, dtype=noise.dtype, device=noise.device
-        )
-        self._initialize_crossattn_cache(
-            batch_size=batch_size, dtype=noise.dtype, device=noise.device
-        )
+        # Step 1: Initialize or reset caches for this rollout.
+        if self.kv_cache1 is None:
+            self._initialize_kv_cache(
+                batch_size=batch_size, dtype=noise.dtype, device=noise.device
+            )
+            self._initialize_crossattn_cache(
+                batch_size=batch_size, dtype=noise.dtype, device=noise.device
+            )
+        else:
+            for block_index in range(self.num_transformer_blocks):
+                self.crossattn_cache[block_index]["is_init"] = False
+            self._reset_kv_cache(device=noise.device)
         
 
         # Step 2: Cache context feature
@@ -238,17 +243,18 @@ class SelfForcingTrainingPipeline:
         """
         Initialize a Per-GPU KV cache for the Wan model.
         """
-        kv_cache1 = []
+        generator = self._get_cache_api_generator()
+        self.kv_cache1 = generator.build_kv_cache(
+            batch_size=batch_size,
+            dtype=dtype,
+            device=device,
+            num_transformer_blocks=self.num_transformer_blocks,
+            frame_seq_length=self.frame_seq_length,
+        )
 
-        for _ in range(self.num_transformer_blocks):
-            kv_cache1.append({
-                "k": torch.zeros([batch_size, self.kv_cache_size, 12, 128], dtype=dtype, device=device),
-                "v": torch.zeros([batch_size, self.kv_cache_size, 12, 128], dtype=dtype, device=device),
-                "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
-                "local_end_index": torch.tensor([0], dtype=torch.long, device=device)
-            })
-
-        self.kv_cache1 = kv_cache1  # always store the clean cache
+    def _reset_kv_cache(self, device):
+        generator = self._get_cache_api_generator()
+        generator.reset_kv_cache(self.kv_cache1, device=device)
 
     def _initialize_crossattn_cache(self, batch_size, dtype, device):
         """
@@ -263,3 +269,9 @@ class SelfForcingTrainingPipeline:
                 "is_init": False
             })
         self.crossattn_cache = crossattn_cache
+
+    def _get_cache_api_generator(self):
+        generator = self.generator
+        if hasattr(generator, "module"):
+            return generator.module
+        return generator

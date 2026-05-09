@@ -6,7 +6,12 @@ import torch
 
 from pipeline import SelfForcingTrainingPipeline,TeacherForcingTrainingPipeline,BidirectionalTrainingPipeline
 from utils.loss import get_denoising_loss
-from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
+from utils.wan_wrapper import (
+    WanDiffusionWrapper,
+    WanDiffusionWrapperPackForcing,
+    WanTextEncoder,
+    WanVAEWrapper,
+)
 
 
 class BaseModel(nn.Module):
@@ -28,7 +33,13 @@ class BaseModel(nn.Module):
         self.real_model_name = getattr(args, "real_name", "Wan2.1-T2V-1.3B")
         self.fake_model_name = getattr(args, "fake_name", "Wan2.1-T2V-1.3B")
         self.iscausal = getattr(args, "causal", True)
-        self.generator = WanDiffusionWrapper(**getattr(args, "model_kwargs", {}), is_causal=self.iscausal)
+        generator_kwargs = dict(getattr(args, "model_kwargs", {}))
+        generator_cls = (
+            WanDiffusionWrapperPackForcing
+            if generator_kwargs.get("pack_enable", False)
+            else WanDiffusionWrapper
+        )
+        self.generator = generator_cls(**generator_kwargs, is_causal=self.iscausal)
         self.generator.model.requires_grad_(True)
 
         self.real_score = WanDiffusionWrapper(model_name=self.real_model_name, is_causal=False)

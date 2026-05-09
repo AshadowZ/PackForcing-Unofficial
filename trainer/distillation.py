@@ -122,7 +122,7 @@ class Trainer:
             dataset,
             batch_size=config.batch_size,
             sampler=sampler,
-            num_workers=8)
+            num_workers=getattr(config, "num_workers", 8))
 
         if dist.get_rank() == 0:
             print("DATASET SIZE %d" % len(dataset))
@@ -302,6 +302,7 @@ class Trainer:
 
     def train(self):
         start_step = self.step
+        max_train_steps = getattr(self.config, "max_train_steps", None)
        
         while True:
             TRAIN_GENERATOR = self.step % self.config.dfake_gen_update_ratio == 0
@@ -377,3 +378,8 @@ class Trainer:
                     if not self.disable_wandb:
                         wandb.log({"per iteration time": current_time - self.previous_time}, step=self.step)
                     self.previous_time = current_time
+
+            if max_train_steps is not None and self.step >= max_train_steps:
+                if self.is_main_process:
+                    print(f"Reached max_train_steps={max_train_steps}, stopping training loop.")
+                break

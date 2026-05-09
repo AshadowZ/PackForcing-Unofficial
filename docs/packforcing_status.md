@@ -33,6 +33,18 @@ This is not yet a paper-complete PackForcing implementation.
   and a PackForcing wrapper in
   [utils/wan_wrapper.py](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/utils/wan_wrapper.py).
 
+- An initial DMD training integration path:
+  - the generator can now switch to the PackForcing wrapper from config
+  - `SelfForcingTrainingPipeline` now uses the unified KV cache build/reset API
+  - a starter config is provided in
+    [configs/packforcing_dmd_chunkwise.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise.yaml)
+  - a minimal one-step smoke config is provided in
+    [configs/packforcing_dmd_chunkwise_smoke.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_smoke.yaml)
+  - an 8-GPU 10-step validation config is provided in
+    [configs/packforcing_dmd_chunkwise_8gpu_10step.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_8gpu_10step.yaml)
+  - a formal 8-GPU launcher is provided in
+    [scripts/train_packforcing_dmd_8gpu.sh](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/scripts/train_packforcing_dmd_8gpu.sh)
+
 ## RoPE Status
 
 - Packed-history RoPE correction is implemented.
@@ -118,10 +130,77 @@ The DeepForcing comparison directory that is still kept is:
 
 ## Known Gaps
 
-- No training-time Pack cache path yet
+- Only the DMD `SelfForcingTrainingPipeline` path has been wired for PackForcing so far
 - No paper-complete mid-selection algorithm
 - No learned PackForcing compressor
 - No paper-complete long-video evaluation harness
+
+## Training Smoke
+
+A minimal PackForcing DMD training smoke now passes with the current codebase.
+
+Validated command:
+
+```bash
+/beijing-c/workspace/hxj/miniconda3/envs/packforcing/bin/python -m torch.distributed.run \
+  --standalone --nproc_per_node=1 train.py \
+  --config_path configs/packforcing_dmd_chunkwise_smoke.yaml \
+  --logdir logs/packforcing_dmd_chunkwise_smoke \
+  --disable-wandb \
+  --no_visualize \
+  --no_save
+```
+
+Notes:
+
+- the smoke config runs `max_train_steps: 1`
+- `gradient_checkpointing` is enabled
+- `text_encoder_cpu_offload: true`
+- `num_workers: 0`
+- the run uses the existing local conda env at
+  `/beijing-c/workspace/hxj/miniconda3/envs/packforcing`
+
+This smoke is intended to validate PackForcing training-path wiring and
+backward execution, not to benchmark full training throughput.
+
+## 8-GPU Validation
+
+An 8-GPU FSDP PackForcing DMD validation run now passes for 10 steps.
+
+Validated launcher:
+
+```bash
+./scripts/train_packforcing_dmd_8gpu_10step.sh
+```
+
+Current validation setup:
+
+- uses `hybrid_full` sharding on 8x A100-80GB
+- keeps the current repository's `3f21l` training scaffold
+- uses `pack_sink_blocks: 2`
+- uses `pack_recent_blocks: 1`
+- uses `pack_mid_select_topk_blocks: 16`
+- uses `pack_mid_selection_mode: recency`
+- uses `pack_compress_mode: identity`
+- points to the legacy prompt corpus at
+  `/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial-legacy/prompts/vidprom_filtered_extended.txt`
+
+This validates that the PackForcing training path is now runnable under
+multi-GPU FSDP, not just single-GPU smoke.
+
+## Current Training Default
+
+The current DMD training default is intentionally conservative:
+
+- compressor: `identity`
+- mid selection: `recency`
+- top-k mid blocks: `16`
+- sink blocks: `2`
+
+Under the current 5s `3f21l` training window, this means the training-time
+history is still very close to the original Causal-Forcing KV-cache behavior.
+The code path is PackForcing, but the training distribution shift remains
+small until a learned or lossy compressor is introduced.
 
 ## Working Decision
 

@@ -1,6 +1,7 @@
 import argparse
 import os
 from omegaconf import OmegaConf
+import torch.distributed as dist
 import wandb
 
 from trainer import DiffusionTrainer, ODETrainer, ScoreDistillationTrainer, ConsistencyDistillationTrainer
@@ -41,6 +42,9 @@ def main():
     elif config.trainer == "consistency_distillation":
         trainer = ConsistencyDistillationTrainer(config)
     trainer.train()
+
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
     wandb.finish()
 
