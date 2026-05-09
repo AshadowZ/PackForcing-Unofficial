@@ -29,6 +29,7 @@ is an engineering baseline for training and long-context inference experiments.
   - `CausalWanAttentionBlockPackForcing`
   - `CausalWanModelPackForcing`
   - train-time history-mid rebuild from stored source latents
+  - explicit metadata alignment check between source-mid history and per-layer mid KV cache
   - internal Pack layer cache state for FSDP-safe cross-chunk reuse
 
 - HR compressor:
@@ -41,6 +42,11 @@ is an engineering baseline for training and long-context inference experiments.
 - Wrapper:
   [utils/wan_wrapper.py](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/utils/wan_wrapper.py)
   - PackForcing wrapper uses model-internal Pack KV cache state
+  - external `kv_cache` is now an opaque `PackCacheHandle`, not a mutable layer-cache list
+  - PackForcing sessions expose two cache modes:
+    - `rollout_compatible`
+    - `finalized_chunk_only`
+  - `commit_kv_cache(...)` is the unified helper for cache-only history commits
   - legacy generator checkpoints can load while initializing new compressor weights
 
 ## RoPE And Mid Selection
@@ -77,6 +83,83 @@ Important current behavior:
   - `pack_comp_grad`
   - `pack_comp_update`
   - `pack_tokens`
+- for `hr_spatial`, no-grad rollout steps populate both:
+  - internal per-layer Pack KV cache
+  - model-internal source latent history
+- the grad-enabled target step rebuilds history-mid compressed hidden from the
+  stored source latents, then replaces the cached mid KV view with trainable
+  per-layer mid KV tensors for attention
+
+## Inference Cache Semantics
+
+The current inference path now separates cache ownership, cache mode, and cache
+commit semantics explicitly.
+
+- the real PackForcing cross-chunk state lives inside the wrapped model
+- the outer pipeline only holds an opaque `PackCacheHandle`
+- pure inference uses `finalized_chunk_only` mode
+- training rollout continues to use `rollout_compatible` mode
+
+For pure inference, denoising-step forwards are now read-only with respect to
+Pack history. History only advances on explicit commit calls.
+
+The unified commit path is:
+
+- [utils/wan_wrapper.py](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/utils/wan_wrapper.py)
+  - `commit_kv_cache(...)`
+
+For PackForcing, that helper routes to:
+
+- `pack_cache_commit=True`
+- `pack_cache_only=True`
+
+This means cache-seed and finalized-chunk refresh calls still execute:
+
+- patch embedding
+- transformer blocks
+- Pack KV / source-latent commit
+
+But they now skip:
+
+- diffusion head
+- unpatchify
+- `flow_pred -> pred_x0` reconstruction
+
+So the final inference-only cache refresh is now a cache-maintenance path, not
+a second full output-producing forward.
+
+## Recent Bug Fixes
+
+On 2026-05-08 we found and fixed a real HR PackForcing cache bug in the
+same-block update path.
+
+Root cause:
+
+- `_build_precomputed_mid_block()` creates transient mid metadata with
+  `source_block_id=None`
+- the first commit path normalizes that metadata correctly
+- but repeated denoising updates for the same temporal block used
+  `_upsert_pack_cache_block()` to overwrite `tail.precomputed_mid` directly
+  without re-normalizing metadata
+- this could silently erase `source_block_id` and break the identity mapping
+  between:
+  - `pack_source_state.mid_blocks`
+  - per-layer `kv_cache.mid_blocks`
+
+Current fix:
+
+- same-block `precomputed_mid` updates are now normalized against the block
+  metadata before writing back into cache
+- training now performs an explicit alignment check on
+  `(source_block_id, start_frame, num_frames)` before rebuilding history-mid
+  hidden
+
+Impact:
+
+- before the fix, training could have fallen back to fragile positional
+  lockstep between the two state machines
+- with the new assertion, any future divergence should fail fast instead of
+  silently corrupting history-mid supervision
 
 ## FSDP Lesson Learned
 
@@ -99,6 +182,8 @@ The current fix is:
 - Pack layer KV cache is also model-internal
 - cross-chunk PackForcing state is no longer implemented as an external mutable
   object whose reuse depends on implicit side effects across the FSDP boundary
+- the external pipeline handle is now intentionally opaque, so callers no
+  longer depend on model-internal layer-cache structure
 
 ## Configs To Keep
 
@@ -158,6 +243,56 @@ Current pass criterion is:
 - `pack_tokens` matches
 
 Exact numeric equality is not currently required for this smoke.
+
+Latest multi-GPU HR smoke results on 2026-05-08:
+
+- `grad_accum=2`, `1 step`
+  - log:
+    [logs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2_smoke_rerun2/stdout.log](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/logs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2_smoke_rerun2/stdout.log)
+  - result:
+    - finished successfully
+    - `pack_comp_grad=0.010710`
+    - `pack_comp_update=0.003978`
+    - `pack_tokens=273.0`
+
+- `grad_accum=2`, `5 step`
+  - log:
+    [logs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2_5step_smoke_rerun/stdout.log](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/logs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2_5step_smoke_rerun/stdout.log)
+  - result:
+    - finished successfully
+    - `pack_comp_grad=0.002420`
+    - `pack_comp_update=0.003810`
+    - `pack_tokens=273.0`
+
+Latest cache-only inference / regression checks on 2026-05-08:
+
+- single-card PackForcing inference smoke with cache-only commit path passed
+  - config:
+    [configs/packforcing_dmd_chunkwise_hr_smoke.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_smoke.yaml)
+  - output:
+    [a calm fox walking through a snowy forest.mp4](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/output/packforcing_inference_commit_helper_smoke/a%20calm%20fox%20walking%20through%20a%20snowy%20forest.mp4)
+  - result:
+    - finished successfully after switching both initial cache seed and finalized chunk refresh to `commit_kv_cache(...)`
+
+- 4-GPU HR training regression after cache-only inference-path cleanup passed
+  - config:
+    [configs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2_smoke.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2_smoke.yaml)
+  - result:
+    - finished successfully
+    - `g_loss=0.143202`
+    - `pack_comp_grad=0.009126`
+    - `pack_comp_update=0.003947`
+    - `pack_tokens=273.0`
+
+Current practical conclusion:
+
+- the internal Pack KV cache path is working for the current DMD +
+  SelfForcing + FSDP training setup
+- the HR compressor is being exercised on the grad-enabled step
+- both the 1-step and 5-step `grad_accum=2` smokes completed without:
+  - cache metadata mismatch
+  - FSDP collective hangs
+  - the old `clip_grad_norm_()` false hang
 
 ## Debugging Workflow
 

@@ -43,6 +43,13 @@ complexity.
   interpreter directly as
   `/beijing-c/workspace/hxj/miniconda3/envs/packforcing/bin/python ...`
   instead of creating or mutating another environment.
+- Treat this as a hard default for all local validation in this repo:
+  `train.py`, `inference*.py`, `demo.py`, and `torchrun` smoke tests should run
+  from the `packforcing` environment unless the user explicitly asks for a
+  different one.
+- Do not fall back to the base environment for PackForcing validation. Missing
+  packages or ABI mismatches there can produce unrelated failures and waste
+  debugging time.
 
 ## Commit Format
 
