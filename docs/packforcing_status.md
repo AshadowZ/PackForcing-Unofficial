@@ -290,6 +290,44 @@ Current practical conclusion:
   - FSDP collective hangs
   - the old `clip_grad_norm_()` false hang
 
+## Stage Summary
+
+What this branch has already achieved:
+
+- PackForcing-style KV cache semantics are implemented on top of the causal
+  forcing model path
+- the cache is now model-internal and FSDP-safe instead of being a fragile
+  external mutable object
+- a trainable `hr_spatial` compressor is wired into the backward path
+- inference has explicit cache ownership and explicit cache-commit semantics
+
+What the recent experiments suggest:
+
+- `sink=2 / recent=1` tends to collapse toward a static-looking solution
+- `sink=3 / recent=2` is closer to the paper-style recipe, but the model still
+  drifts toward stasis by later training steps
+- the current implementation is therefore functionally working, but not yet a
+  faithful long-horizon reproduction
+
+Most plausible mismatch sources, in priority order:
+
+- the current path is still closer to `causal forcing` than paper-style
+  `self forcing`
+- mid selection is still simplified (`recency` / `query_score` + top-k), not a
+  paper-complete selection rule
+- RoPE packing/correction is engineering-consistent, but may not match the
+  paper's exact long-horizon state evolution
+- the current HR compressor is spatial-only and does not include the paper's
+  full dual-branch / temporal-compression behavior
+
+Working hypothesis:
+
+- the model is learning a conservative low-motion fixed point that is stable
+  under the current rollout and cache semantics, but does not extrapolate well
+  beyond a few seconds
+- extending the reachable RoPE range alone is likely not enough if the training
+  rollout semantics remain mismatched
+
 ## Debugging Workflow
 
 PackForcing debug runs should be launched in `tmux`, not in an ephemeral
@@ -336,3 +374,5 @@ while the 4-GPU `grad_accum=2` recipe is kept as the cheaper regression path.
 - No paper-complete mid-selection algorithm
 - No LR compressor branch
 - No paper-complete long-video evaluation harness
+- Current long-horizon extrapolation still degrades toward static output after
+  enough training, so the reproduction is not yet paper-faithful at scale
