@@ -3,8 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-/beijing-c/workspace/hxj/miniconda3/envs/packforcing/bin/python}"
-CONFIG_PATH="${CONFIG_PATH:-${ROOT_DIR}/configs/packforcing_dmd_chunkwise_hr.yaml}"
-LOGDIR="${LOGDIR:-${ROOT_DIR}/logs/packforcing_dmd_chunkwise_hr}"
+CONFIG_PATH="${CONFIG_PATH:-${ROOT_DIR}/configs/packforcing_dmd_chunkwise_hr_8gpu_sink3_recent2.yaml}"
+LOGDIR="${LOGDIR:-${ROOT_DIR}/logs/packforcing_dmd_chunkwise_hr_8gpu_sink3_recent2}"
 MASTER_PORT="${MASTER_PORT:-29553}"
 GPU_LIST="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 DISABLE_WANDB="${DISABLE_WANDB:-1}"

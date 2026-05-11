@@ -187,24 +187,22 @@ The current fix is:
 
 ## Configs To Keep
 
-The retained HR configs are:
+The retained PackForcing-specific configs are:
 
-- [configs/packforcing_dmd_chunkwise_hr.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr.yaml)
-  - formal HR training config
-- [configs/packforcing_dmd_chunkwise_hr_8gpu_smoke.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_8gpu_smoke.yaml)
-  - 8-GPU one-step validation
-- [configs/packforcing_dmd_chunkwise_hr_8gpu_10step.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_8gpu_10step.yaml)
-  - 8-GPU 10-step validation
-- [configs/packforcing_dmd_chunkwise_hr_smoke.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_smoke.yaml)
-  - single-card functional smoke
+- [configs/packforcing_dmd_chunkwise_hr_8gpu_sink3_recent2.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_8gpu_sink3_recent2.yaml)
+  - current main HR training recipe
+- [configs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2.yaml)
+  - cheaper 4-GPU regression / reproduction recipe
 - [configs/packforcing_dmd_chunkwise_hr_strict_compare_fsdp.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_strict_compare_fsdp.yaml)
 - [configs/packforcing_dmd_chunkwise_hr_strict_compare_nofsdp.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_strict_compare_nofsdp.yaml)
   - strict FSDP vs no-FSDP comparison
 
+Older smoke-only YAMLs were transient debugging artifacts and have been removed
+from `configs/`.
+
 The retained HR scripts are:
 
 - [scripts/train_packforcing_dmd_hr_8gpu.sh](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/scripts/train_packforcing_dmd_hr_8gpu.sh)
-- [scripts/train_packforcing_dmd_hr_8gpu_10step.sh](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/scripts/train_packforcing_dmd_hr_8gpu_10step.sh)
 - [scripts/compare_packforcing_fsdp_nofsdp.sh](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/scripts/compare_packforcing_fsdp_nofsdp.sh)
 
 ## Validation Policy
@@ -213,8 +211,8 @@ Future core changes should be checked with strict compare first.
 
 The intended rule is:
 
-- functional smoke confirms the code still runs
-- strict compare confirms FSDP and no-FSDP still behave similarly
+- strict compare is the first gate for cache / FSDP / HR-compressor changes
+- the 4-GPU `grad_accum=2` recipe is the practical cheap training regression
 
 Use:
 
@@ -266,17 +264,15 @@ Latest multi-GPU HR smoke results on 2026-05-08:
 
 Latest cache-only inference / regression checks on 2026-05-08:
 
-- single-card PackForcing inference smoke with cache-only commit path passed
-  - config:
-    [configs/packforcing_dmd_chunkwise_hr_smoke.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_smoke.yaml)
+- single-card PackForcing inference regression with cache-only commit path passed
   - output:
     [a calm fox walking through a snowy forest.mp4](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/output/packforcing_inference_commit_helper_smoke/a%20calm%20fox%20walking%20through%20a%20snowy%20forest.mp4)
   - result:
     - finished successfully after switching both initial cache seed and finalized chunk refresh to `commit_kv_cache(...)`
 
 - 4-GPU HR training regression after cache-only inference-path cleanup passed
-  - config:
-    [configs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2_smoke.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2_smoke.yaml)
+  - config family:
+    [configs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2.yaml](/beijing-c/workspace/hxj/a-glj-ws/AR-Video/PackForcing-Unofficial/configs/packforcing_dmd_chunkwise_hr_4gpu_gradacc2.yaml)
   - result:
     - finished successfully
     - `g_loss=0.143202`
@@ -323,16 +319,16 @@ tests, but it is not suitable for multi-GPU smoke when
 
 ## Current Defaults
 
-The current training defaults remain conservative:
+The current maintained HR training default is:
 
-- `pack_sink_blocks: 2`
-- `pack_recent_blocks: 1`
+- `pack_sink_blocks: 3`
+- `pack_recent_blocks: 2`
 - `pack_mid_select_topk_blocks: 16`
 - `pack_mid_selection_mode: recency`
-- `pack_compress_mode: identity` for conservative baseline training
+- `pack_compress_mode: hr_spatial`
 
-The HR path is implemented and trainable, but the repository still keeps the
-identity path available as the lowest-risk baseline.
+The 8-GPU `sink=3 / recent=2` recipe is now the main maintained training path,
+while the 4-GPU `grad_accum=2` recipe is kept as the cheaper regression path.
 
 ## Known Gaps
 
