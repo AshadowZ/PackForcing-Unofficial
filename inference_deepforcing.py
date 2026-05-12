@@ -38,7 +38,6 @@ parser.add_argument("--pc_enable", action="store_true", help="Enable DeepForcing
 parser.add_argument("--budget", type=int, default=None, help="Override total retained budget in latent frames")
 parser.add_argument("--recent", type=int, default=None, help="Override recent window in latent frames")
 parser.add_argument("--pc_mid_rope_unification", action="store_true", help="Enable experimental mid/top-c temporal RoPE unification")
-parser.add_argument("--pc_bootstrap_delta", action="store_true", help="Enable the original DeepForcing first-PC sink bootstrap delta")
 args = parser.parse_args()
 
 # Initialize distributed inference
@@ -82,8 +81,6 @@ if args.recent is not None:
     config.model_kwargs["recent"] = int(args.recent)
 if args.pc_mid_rope_unification:
     config.model_kwargs["pc_mid_rope_unification"] = True
-if args.pc_bootstrap_delta:
-    config.model_kwargs["pc_bootstrap_delta"] = True
 
 generator = WanDiffusionWrapperDeepForcing(
     **dict(config.model_kwargs),

@@ -55,7 +55,6 @@ def _rope_time_delta_mul_(k_chunk: torch.Tensor, freqs: torch.Tensor, delta_fram
     time_ri.copy_(time_ri_new.to(time_ri.dtype))
 
 
-
 def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
     n, c = x.size(2), x.size(3) // 2
 
@@ -90,7 +89,7 @@ def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
 class PCConfig:
     def __init__(self, enable=False, capacity=1560 * 15, window=1560 * 4,
                  fusion="sum", keep_sinks=True, topc_max_reuse=0,
-                 mid_rope_unification=False, bootstrap_delta=False):
+                 mid_rope_unification=False):
         self.enable = enable
         self.capacity = int(capacity)
         self.window = int(window)
@@ -98,7 +97,6 @@ class PCConfig:
         self.keep_sinks = keep_sinks
         self.topc_max_reuse = max(0, int(topc_max_reuse))
         self.mid_rope_unification = bool(mid_rope_unification)
-        self.bootstrap_delta = bool(bootstrap_delta)
 
 
 def _mkv_update_win_q(kv_cache, new_win_q, window_tokens):
@@ -605,10 +603,8 @@ class CausalWanSelfAttentionDeepForcing(nn.Module):
                             kv_cache["sink_base_abs_start_frame"] = torch.tensor(
                                 desired_sink_abs_start, device=kv_cache["k"].device
                             )
-                            if self.PC.bootstrap_delta:
-                                delta_sink = self.max_attention_size - (self.PC.capacity // frame_seqlen)
-                            else:
-                                delta_sink = 0
+                            local_window_frames = self.max_attention_size // frame_seqlen
+                            delta_sink = local_window_frames - (self.PC.capacity // frame_seqlen)
                         else:
                             delta_sink = int(
                                 desired_sink_abs_start - kv_cache["sink_base_abs_start_frame"].item()
@@ -656,8 +652,9 @@ class CausalWanSelfAttentionDeepForcing(nn.Module):
                             kv_cache["sink_base_abs_start_frame"] = torch.tensor(
                                 desired_sink_abs_start, device=kv_cache["k"].device
                             )
-                            if self.PC.enable and self.PC.bootstrap_delta:
-                                delta = self.max_attention_size - (self.PC.capacity // frame_seqlen)
+                            if self.PC.enable:
+                                local_window_frames = self.max_attention_size // frame_seqlen
+                                delta = local_window_frames - (self.PC.capacity // frame_seqlen)
                             else:
                                 delta = 0
                         else:
@@ -883,8 +880,7 @@ class CausalWanModelDeepForcing(ModelMixin, ConfigMixin):
                  PC_fusion: str = "sum",
                  PC_keep_sinks: bool = True,
                  PC_topc_max_reuse: int = 7,
-                 PC_mid_rope_unification: bool = False,
-                 PC_bootstrap_delta: bool = False):
+                 PC_mid_rope_unification: bool = False):
         r"""
         Initialize the diffusion model backbone.
 
@@ -962,7 +958,6 @@ class CausalWanModelDeepForcing(ModelMixin, ConfigMixin):
             keep_sinks=PC_keep_sinks,
             topc_max_reuse=PC_topc_max_reuse,
             mid_rope_unification=PC_mid_rope_unification,
-            bootstrap_delta=PC_bootstrap_delta,
         )
 
         # blocks

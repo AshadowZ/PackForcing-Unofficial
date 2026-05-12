@@ -406,7 +406,6 @@ class WanDiffusionWrapperDeepForcing(WanDiffusionWrapper):
             pc_keep_sinks=True,
             pc_topc_max_reuse=7,
             pc_mid_rope_unification=False,
-            pc_bootstrap_delta=False,
     ):
         nn.Module.__init__(self)
 
@@ -422,7 +421,6 @@ class WanDiffusionWrapperDeepForcing(WanDiffusionWrapper):
                 PC_keep_sinks=pc_keep_sinks,
                 PC_topc_max_reuse=pc_topc_max_reuse,
                 PC_mid_rope_unification=pc_mid_rope_unification,
-                PC_bootstrap_delta=pc_bootstrap_delta,
             )
         else:
             self.model = WanModel.from_pretrained(wan_model_path(model_name))
