@@ -1101,7 +1101,20 @@ def _compute_mid_block_scores(
     mid_blocks: list[CompressedKVBlock],
     mode: str,
 ) -> torch.Tensor:
-    """Compute debugging-friendly block scores for mid selection."""
+    """Compute block-level mid selection scores.
+
+    The ``query_score`` path is a minimal alignment with the paper's Appendix G:
+    - deterministic query subsampling
+    - half-head evaluation
+    - token-level query/key affinity aggregation
+
+    This version intentionally keeps the existing call signature, so it still
+    uses the current block queries only.
+
+    TODO: extend the scoring path to include recent-block queries in addition
+    to the current block, so the query scope matches the paper's
+    ``recent + current`` formulation more closely.
+    """
 
     if mode == "recency":
         del roped_query
@@ -1115,14 +1128,57 @@ def _compute_mid_block_scores(
         ).unsqueeze(0).expand(batch_size, -1)
 
     if mode == "query_score":
-        query_summary = roped_query.mean(dim=1)  # [B, H, D]
-        stacked_mid_summary = torch.stack(
-            [block.k.mean(dim=1) for block in mid_blocks],
+        batch_size, query_tokens, num_heads, head_dim = roped_query.shape
+        num_eval_heads = max(1, num_heads // 2)
+        sampled_indices = _deterministic_query_subsample_indices(
+            num_query_tokens=query_tokens,
+            device=roped_query.device,
+        )
+
+        query_tokens_sub = roped_query[:, sampled_indices, :num_eval_heads, :].to(torch.float32)
+        query_tokens_sub = query_tokens_sub.permute(0, 2, 1, 3).contiguous()  # [B, Hopt, Sq, D]
+
+        stacked_mid_keys = torch.stack(
+            [block.k[:, :, :num_eval_heads, :] for block in mid_blocks],
             dim=1,
-        )  # [B, M, H, D]
-        return (query_summary.unsqueeze(1) * stacked_mid_summary).sum(dim=-1).mean(dim=-1)
+        ).to(torch.float32)  # [B, M, Lk, Hopt, D]
+        stacked_mid_keys = stacked_mid_keys.permute(0, 1, 3, 2, 4).contiguous()  # [B, M, Hopt, Lk, D]
+
+        scaled_query = query_tokens_sub / (float(head_dim) ** 0.5)
+        affinities = torch.einsum(
+            "bhsd,bmhkd->bmhsk",
+            scaled_query,
+            stacked_mid_keys,
+        )  # [B, M, Hopt, Sq, Lk]
+
+        # Eq. (11) aggregates over sampled queries and all keys, then averages
+        # across optimized heads. We keep the score per batch item so the
+        # existing per-sample top-k path in select_mid_blocks() remains intact.
+        return affinities.mean(dim=(-1, -2, -3))
 
     raise ValueError(f"Unsupported mid selection mode: {mode}.")
+
+
+def _deterministic_query_subsample_indices(
+    num_query_tokens: int,
+    device: torch.device,
+    *,
+    sample_ratio: float = 0.125,
+    min_samples: int = 32,
+) -> torch.Tensor:
+    if num_query_tokens <= 0:
+        raise ValueError(f"num_query_tokens must be positive, got {num_query_tokens}.")
+
+    target = max(min_samples, int(sample_ratio * num_query_tokens))
+    target = min(target, num_query_tokens)
+    if target == num_query_tokens:
+        return torch.arange(num_query_tokens, device=device, dtype=torch.long)
+
+    # Uniform deterministic sampling across the temporal-spatial token layout.
+    positions = torch.floor(
+        torch.arange(target, device=device, dtype=torch.float32) * num_query_tokens / target
+    ).to(torch.long)
+    return positions
 
 
 def _upsert_pack_cache_block(
