@@ -37,18 +37,18 @@ the left side uses `sink + recent`, while the right side uses
 <table>
   <tr>
     <td width="50%">
-      <video src="assets/deepforcing_showcase_sample1.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+      <video src="https://github.com/user-attachments/assets/4a52b253-2e0e-4bee-9d73-f220ed517a95" controls muted playsinline preload="metadata" width="100%"></video>
     </td>
     <td width="50%">
-      <video src="assets/deepforcing_showcase_sample2.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+      <video src="https://github.com/user-attachments/assets/bf9545d8-0bfa-4775-8e9a-cc8e638a4b35" controls muted playsinline preload="metadata" width="100%"></video>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <video src="assets/deepforcing_showcase_sample3.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+      <video src="https://github.com/user-attachments/assets/a82e2bca-681c-4ba4-b204-8f5fd85ecb79" controls muted playsinline preload="metadata" width="100%"></video>
     </td>
     <td width="50%">
-      <video src="assets/deepforcing_showcase_sample4.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+      <video src="https://github.com/user-attachments/assets/17d32436-b2f9-4973-8fe5-5aea383f97a9" controls muted playsinline preload="metadata" width="100%"></video>
     </td>
   </tr>
 </table>
@@ -71,18 +71,18 @@ close to the PackForcing paper.
 <table>
   <tr>
     <td width="50%">
-      <video src="assets/packforcing_queryscore_showcase_sample1.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+      <video src="https://github.com/user-attachments/assets/574418e5-1782-4ace-917d-2f16d36b5190" controls muted playsinline preload="metadata" width="100%"></video>
     </td>
     <td width="50%">
-      <video src="assets/packforcing_queryscore_showcase_sample2.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+      <video src="https://github.com/user-attachments/assets/ef02915a-9eb8-451e-9efa-3cf836e92695" controls muted playsinline preload="metadata" width="100%"></video>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <video src="assets/packforcing_queryscore_showcase_sample3.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+      <video src="https://github.com/user-attachments/assets/507e4ffe-7ce3-4ca4-a359-76b653eabdb0" controls muted playsinline preload="metadata" width="100%"></video>
     </td>
     <td width="50%">
-      <video src="assets/packforcing_queryscore_showcase_sample4.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+      <video src="https://github.com/user-attachments/assets/727fa6aa-e33f-4d6a-92f6-c3f5d8f8505b" controls muted playsinline preload="metadata" width="100%"></video>
     </td>
   </tr>
 </table>
@@ -103,10 +103,10 @@ uses `top-k=1`. Both are 20-second inference results.
 <table>
   <tr>
     <td width="50%">
-      <video src="assets/packforcing_snowfield_s3r2_default_steps_2x2.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+      <video src="https://github.com/user-attachments/assets/1957318a-24b0-4d5f-8c1f-a3d75d7d2fe9" controls muted playsinline preload="metadata" width="100%"></video>
     </td>
     <td width="50%">
-      <video src="assets/packforcing_snowfield_s3r2_topk1_steps_2x2.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+      <video src="https://github.com/user-attachments/assets/348bdf1f-a4b2-405b-ba05-c97f7f0621fd" controls muted playsinline preload="metadata" width="100%"></video>
     </td>
   </tr>
 </table>
