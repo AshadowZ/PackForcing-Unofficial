@@ -55,6 +55,52 @@ def _rope_time_delta_mul_(k_chunk: torch.Tensor, freqs: torch.Tensor, delta_fram
     time_ri.copy_(time_ri_new.to(time_ri.dtype))
 
 
+def _rope_time_delta_mul_per_token_(k_chunk: torch.Tensor, freqs: torch.Tensor, delta_frames: torch.Tensor) -> None:
+    """Apply a per-token temporal RoPE shift in-place to already-roped mid keys."""
+    if delta_frames.numel() == 0:
+        return
+
+    batch_size, token_count, _, d = k_chunk.shape
+    if delta_frames.dim() == 1:
+        delta_frames = delta_frames.unsqueeze(0).expand(batch_size, -1)
+    elif delta_frames.dim() == 2 and delta_frames.shape[0] == 1 and batch_size != 1:
+        delta_frames = delta_frames.expand(batch_size, -1)
+
+    if delta_frames.shape != (batch_size, token_count):
+        raise ValueError(
+            f"delta_frames shape {tuple(delta_frames.shape)} does not match expected {(batch_size, token_count)}."
+        )
+
+    delta_frames = delta_frames.to(device=k_chunk.device, dtype=torch.long)
+    if not torch.any(delta_frames != 0):
+        return
+
+    assert d % 2 == 0
+    c = d // 2
+    time_c = c - 2 * (c // 3)
+    height_c = c // 3
+    width_c = c // 3
+    freqs_t, _, _ = freqs.split([time_c, height_c, width_c], dim=1)
+
+    max_pos = freqs_t.shape[0] - 1
+    delta_index = delta_frames.abs().clamp(max=max_pos)
+    multiplier = freqs_t.index_select(0, delta_index.reshape(-1)).reshape(batch_size, token_count, time_c)
+    if torch.any(delta_frames < 0):
+        multiplier = torch.where((delta_frames < 0).unsqueeze(-1), torch.conj(multiplier), multiplier)
+    multiplier = multiplier.unsqueeze(2)
+
+    time_ri = k_chunk[..., : 2 * time_c]
+    time_cx = torch.view_as_complex(
+        time_ri.to(torch.float64).reshape(batch_size, token_count, k_chunk.shape[2], time_c, 2)
+    )
+    time_cx = time_cx * multiplier.to(time_cx.dtype)
+    time_ri_new = torch.view_as_real(time_cx).reshape(
+        batch_size, token_count, k_chunk.shape[2], time_c, 2
+    ).flatten(-2)
+    time_ri.copy_(time_ri_new.to(time_ri.dtype))
+
+
+
 def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
     n, c = x.size(2), x.size(3) // 2
 
@@ -89,14 +135,21 @@ def causal_rope_apply(x, grid_sizes, freqs, start_frame=0):
 class PCConfig:
     def __init__(self, enable=False, capacity=1560 * 15, window=1560 * 4,
                  fusion="sum", keep_sinks=True, topc_max_reuse=0,
-                 mid_rope_unification=False):
+                 mid_rope_unification=False, mid_rope_mode=None):
         self.enable = enable
         self.capacity = int(capacity)
         self.window = int(window)
         self.fusion = fusion
         self.keep_sinks = keep_sinks
         self.topc_max_reuse = max(0, int(topc_max_reuse))
-        self.mid_rope_unification = bool(mid_rope_unification)
+        if mid_rope_mode is None:
+            mid_rope_mode = "segment" if mid_rope_unification else "none"
+        self.mid_rope_mode = str(mid_rope_mode)
+        if self.mid_rope_mode not in {"none", "segment", "token"}:
+            raise ValueError(
+                f"Unsupported mid_rope_mode={self.mid_rope_mode!r}; expected 'none', 'segment', or 'token'."
+            )
+        self.mid_rope_unification = self.mid_rope_mode != "none"
 
 
 def _mkv_update_win_q(kv_cache, new_win_q, window_tokens):
@@ -578,7 +631,7 @@ class CausalWanSelfAttentionDeepForcing(nn.Module):
             if rolled_condition:
                 sink_len_tokens = min(local_end_index, sink_tokens)
 
-                if self.PC.enable and self.PC.mid_rope_unification:
+                if self.PC.enable and self.PC.mid_rope_mode != "none":
                     recent_keep_tokens = min(
                         self.PC.window,
                         max(0, local_end_index - sink_len_tokens)
@@ -619,21 +672,36 @@ class CausalWanSelfAttentionDeepForcing(nn.Module):
                         kv_cache["abs_frame_idx"][:, :sink_len_tokens] = sink_frames
 
                     if mid_len_tokens > 0:
-                        if "topc_base_abs_start_frame" not in kv_cache:
-                            kv_cache["topc_base_abs_start_frame"] = torch.tensor(
-                                desired_mid_abs_start, device=kv_cache["k"].device
-                            )
-                        delta_mid = int(
-                            desired_mid_abs_start - kv_cache["topc_base_abs_start_frame"].item()
-                        )
-                        if delta_mid != 0:
-                            _rope_time_delta_mul_(kv_cache["k"][:, mid_start:mid_end], freqs, delta_mid)
-                            kv_cache["topc_base_abs_start_frame"].fill_(desired_mid_abs_start)
                         mid_offsets = torch.arange(mid_len_tokens, device=kv_cache["k"].device)
-                        mid_frames = desired_mid_abs_start + torch.div(
+                        desired_mid_frames = desired_mid_abs_start + torch.div(
                             mid_offsets, frame_seqlen, rounding_mode='floor'
                         )
-                        kv_cache["abs_frame_idx"][:, mid_start:mid_end] = mid_frames
+                        if self.PC.mid_rope_mode == "token":
+                            desired_mid_frames_batch = desired_mid_frames.unsqueeze(0).expand(batch_cache, -1)
+                            current_mid_frames = abs_frame_idx[:, mid_start:mid_end]
+                            delta_mid = torch.where(
+                                current_mid_frames >= 0,
+                                desired_mid_frames_batch - current_mid_frames,
+                                torch.zeros_like(desired_mid_frames_batch),
+                            )
+                            if torch.any(delta_mid != 0):
+                                _rope_time_delta_mul_per_token_(
+                                    kv_cache["k"][:, mid_start:mid_end],
+                                    freqs,
+                                    delta_mid,
+                                )
+                        else:
+                            if "topc_base_abs_start_frame" not in kv_cache:
+                                kv_cache["topc_base_abs_start_frame"] = torch.tensor(
+                                    desired_mid_abs_start, device=kv_cache["k"].device
+                                )
+                            delta_mid = int(
+                                desired_mid_abs_start - kv_cache["topc_base_abs_start_frame"].item()
+                            )
+                            if delta_mid != 0:
+                                _rope_time_delta_mul_(kv_cache["k"][:, mid_start:mid_end], freqs, delta_mid)
+                                kv_cache["topc_base_abs_start_frame"].fill_(desired_mid_abs_start)
+                        kv_cache["abs_frame_idx"][:, mid_start:mid_end] = desired_mid_frames.unsqueeze(0).expand(batch_cache, -1)
 
                     # After PC pruning, cache layout is already [sink][mid][recent].
                     key_win = kv_cache["k"][:, :local_end_index]
@@ -880,7 +948,8 @@ class CausalWanModelDeepForcing(ModelMixin, ConfigMixin):
                  PC_fusion: str = "sum",
                  PC_keep_sinks: bool = True,
                  PC_topc_max_reuse: int = 7,
-                 PC_mid_rope_unification: bool = False):
+                 PC_mid_rope_unification: bool = False,
+                 PC_mid_rope_mode=None):
         r"""
         Initialize the diffusion model backbone.
 
@@ -958,6 +1027,7 @@ class CausalWanModelDeepForcing(ModelMixin, ConfigMixin):
             keep_sinks=PC_keep_sinks,
             topc_max_reuse=PC_topc_max_reuse,
             mid_rope_unification=PC_mid_rope_unification,
+            mid_rope_mode=PC_mid_rope_mode,
         )
 
         # blocks

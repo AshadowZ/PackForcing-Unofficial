@@ -14,5 +14,5 @@ model_kwargs:
   pc_enable: true
   budget: 16
   recent: 4
-  pc_mid_rope_unification: false
+  pc_mid_rope_mode: none
 data_path: prompts/demos.txt
