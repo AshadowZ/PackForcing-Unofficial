@@ -53,18 +53,63 @@ the left side uses `sink + recent`, while the right side uses
   </tr>
 </table>
 
-I trained two 8-GPU runs for 3k steps with no gradient accumulation and global
-batch size 8: one with `sink=2 chunk + recent=1 chunk`, and one with
-`sink=3 chunk + recent=2 chunk`. As training goes on, the dynamic degree gets
-lower, which matches the trend already mentioned in the Causal Forcing README.
-The `sink=2 / recent=1` run stays low-motion almost throughout, while
-`sink=3 / recent=2` looks better around step 1000.
+### PackForcing Reproduction Result
 
-The videos above were checked with inference `top-k=3/1`, not the paper-style
-`top-k=16`. I also kept the inference-time RoPE range close to the training
-range there. When I switch back to `top-k=16`, the 20-second inference result
-blows up much more easily, and I still do not know which mismatch is the main
-cause.
+I also tried a more paper-like setup: `sink=3`, `recent=2`, `mid top-k=16`
+(chunk units), trained for 3k steps on 8 GPUs with global batch size 8 and no
+gradient accumulation.
+
+There is indeed no large-scale color drift or full collapse as generation goes
+on. However, the aerial-view sample still breaks, there is a visible jump
+around 5-10 seconds, the frames remain noisy throughout, and gray blocks
+sometimes appear in the top-left corner.
+
+Next I will probably run a few more experiments to narrow down where these
+issues come from. If they can all be resolved, the result should be fairly
+close to the PackForcing paper.
+
+<table>
+  <tr>
+    <td width="50%">
+      <video src="assets/packforcing_queryscore_showcase_sample1.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+    </td>
+    <td width="50%">
+      <video src="assets/packforcing_queryscore_showcase_sample2.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <video src="assets/packforcing_queryscore_showcase_sample3.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+    </td>
+    <td width="50%">
+      <video src="assets/packforcing_queryscore_showcase_sample4.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+    </td>
+  </tr>
+</table>
+
+### Debugging Notes
+
+I also ran a few extra checks. For example, when I reduce inference-time
+`top-k` selection from `16` to `1`, the train/infer RoPE range stays aligned,
+and the visible jumps disappear, which makes me suspect the jump issue is
+related to RoPE. I also tracked how the frames change across training steps:
+the videos tend to become more static as training goes on, while the gray
+blocks get gradually suppressed. My guess is that the gray-block artifact shows
+up because the HR Compressor is still not fully trained.
+
+In the comparison below, the left video uses `top-k=16`, while the right video
+uses `top-k=1`. Both are 20-second inference results.
+
+<table>
+  <tr>
+    <td width="50%">
+      <video src="assets/packforcing_snowfield_s3r2_default_steps_2x2.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+    </td>
+    <td width="50%">
+      <video src="assets/packforcing_snowfield_s3r2_topk1_steps_2x2.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+    </td>
+  </tr>
+</table>
 
 ## Usage
 
@@ -99,19 +144,18 @@ and the training behavior is broadly consistent with the paper (maybe).
 
 ## Discussion
 
-1. While building this repo, I found that something like Deep Forcing can
-   already achieve surprisingly good infinite continuation by just treating the
-   first few frames as sink and adjusting the RoPE behavior. In practice, the
-   extra trained PackForcing-style model does not yet look dramatically better
-   than the training-free baseline here, which makes me wonder what the real
-   gain of training is under the current setup.
+1. As this reproduction moved forward, I found that training-free methods such
+   as [Deep Forcing](https://github.com/cvlab-kaist/DeepForcing) and
+   [Infinite-Forcing](https://github.com/SOTAMak1r/Infinite-Forcing) can
+   already produce reasonably watchable infinite continuation. As long as the
+   first few frames are kept and the RoPE behavior is corrected, the video can
+   stay visually coherent without the colors collapsing over time.
 
-2. I also found that Causal Forcing and Self Forcing are not as interchangeable
-   as I first assumed. For example, when I directly add Deep Forcing bootstrap
-   tricks on top of Causal Forcing, the video can collapse badly instead of
-   acting like a clean drop-in replacement. Next time I try to reproduce a
-   paper, I should probably stay closer to the original setup, otherwise bugs
-   and implementation mismatches become hard to disentangle in ablations.
+2. I also found that Self Forcing itself tends to produce relatively
+   low-motion videos. More generally, these trained infinite-continuation
+   methods seem to prefer lowering the motion further, because once the motion
+   gets too large, the generation can more easily drift outside the memory
+   patterns seen during training and collapse.
 
 ## Acknowledgements
 
