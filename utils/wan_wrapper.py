@@ -355,8 +355,17 @@ class WanDiffusionWrapper(torch.nn.Module):
 
     def reset_kv_cache(self, kv_cache, device: torch.device) -> None:
         for layer_cache in kv_cache:
+            # Reset the core KV buffers so a new prompt starts from a truly clean cache.
+            layer_cache["k"].zero_()
+            layer_cache["v"].zero_()
             layer_cache["global_end_index"] = torch.tensor([0], dtype=torch.long, device=device)
             layer_cache["local_end_index"] = torch.tensor([0], dtype=torch.long, device=device)
+            # DeepForcing attaches extra runtime state to the same cache dict.
+            # Those tensors/scalars must not survive across prompts in the same process.
+            for extra_key in list(layer_cache.keys()):
+                if extra_key in {"k", "v", "global_end_index", "local_end_index"}:
+                    continue
+                del layer_cache[extra_key]
 
     def commit_kv_cache(
         self,
