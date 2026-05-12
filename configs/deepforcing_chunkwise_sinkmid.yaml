@@ -14,5 +14,5 @@ model_kwargs:
   pc_enable: true
   budget: 16
   recent: 4
-  pc_mid_rope_mode: none
+  pc_mid_rope_mode: token
 data_path: prompts/demos.txt

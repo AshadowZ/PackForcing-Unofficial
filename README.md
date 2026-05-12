@@ -28,9 +28,30 @@ beginner, so this was a casual paper-reproduction exercise to learn by doing.
 
 ## Current Status
 
-I ported training-free Deep Forcing as a baseline. This baseline is
-`causal_forcing.pt + Deep Forcing`, and I will place the sink-only / sink+mid
-comparison videos here later.
+### Training-Free Deep Forcing Baseline
+
+Baseline: `causal_forcing.pt + Deep Forcing`. In the comparison videos below,
+the left side uses `sink + recent`, while the right side uses
+`sink + mid top-k + recent` as the KV cache.
+
+<table>
+  <tr>
+    <td width="50%">
+      <video src="assets/deepforcing_showcase_sample1.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+    </td>
+    <td width="50%">
+      <video src="assets/deepforcing_showcase_sample2.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <video src="assets/deepforcing_showcase_sample3.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+    </td>
+    <td width="50%">
+      <video src="assets/deepforcing_showcase_sample4.mp4" controls muted playsinline preload="metadata" width="100%"></video>
+    </td>
+  </tr>
+</table>
 
 I trained two 8-GPU runs for 3k steps with no gradient accumulation and global
 batch size 8: one with `sink=2 chunk + recent=1 chunk`, and one with
