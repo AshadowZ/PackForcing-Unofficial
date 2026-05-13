@@ -92,7 +92,7 @@ close to the PackForcing paper.
 I also ran a few extra checks. For example, when I reduce inference-time
 `top-k` selection from `16` to `1`, the train/infer RoPE range stays aligned,
 and the visible jumps disappear, which makes me suspect the jump issue is
-related to RoPE. I also tracked how the frames change across training steps:
+related to RoPE. (This is also the phenomenon observed in [LoL](https://arxiv.org/abs/2601.16914) and [RIFLEx](https://arxiv.org/pdf/2502.15894): abrupt changes and repetition. Could they be related?) I also tracked how the frames change across training steps:
 the videos tend to become more static as training goes on, while the gray
 blocks get gradually suppressed. My guess is that the gray-block artifact shows
 up because the HR Compressor is still not fully trained.
